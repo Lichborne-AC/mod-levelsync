@@ -12,9 +12,9 @@ LevelSync.Enable = 1
 # Default: 1 (enabled)
 LevelSync.AllowLevelSync = 1
 
-# Allow progression synchronisation within groups.
-# Default: 0 (disabled)
-LevelSync.AllowProgressionSync = 0
+# Allow individual progression synchronisation within groups.
+# Default: 1 (enabled)
+LevelSync.AllowProgressionSync = 1
 
 # Maximum number of accounts allowed per sync group (1-10).
 # Default: 6
