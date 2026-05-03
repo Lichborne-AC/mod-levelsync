@@ -190,7 +190,7 @@ Used with mod-individual-progression. Tiers are stored as hidden quest IDs in `c
 ## UI Addon
 
 https://github.com/Lichborne-AC/LevelsyncUI
-A companion WoW UI addon is in the works (recommended but not required). It provides a graphical interface for managing your sync group, and viewing member status. Recommended but not required. 
+A companion UI addon for levelsync (recommended but not required). Provides a graphical interface for managing your sync group, and viewing member status. 
 
 ---
 
