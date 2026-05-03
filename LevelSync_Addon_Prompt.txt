@@ -1,0 +1,521 @@
+================================================================================
+  MOD-LEVELSYNC — WoW UI ADDON DEVELOPER SPECIFICATION
+  Game Version: World of Warcraft 3.3.5a (Wrath of the Lich King)
+  Server: AzerothCore private server with mod-levelsync installed
+================================================================================
+
+PURPOSE
+-------
+Build a WoW UI addon that provides a graphical interface for mod-levelsync.
+The addon is NOT required for the module to function — all features work via
+chat commands. The addon is a convenience layer that sends those same chat
+commands on behalf of the player and parses the text responses to display a
+clean UI panel.
+
+The addon should be lightweight, fit the WoW 3.3.5a API, and not assume
+the player is always in a sync group (graceful empty states).
+
+
+================================================================================
+  HOW THE ADDON COMMUNICATES WITH THE SERVER
+================================================================================
+
+There is NO custom addon message channel or server-side addon API. All
+communication is through the standard WoW chat system:
+
+  SENDING:   The addon sends chat commands to the server using the EditBox.
+  RECEIVING: The server responds via system messages (CHAT_MSG_SYSTEM).
+
+--- Sending Commands ---
+
+Use this pattern to send a server command without showing it in the chat frame:
+
+  local function SendCmd(cmd)
+      local box = ChatFrame1EditBox
+      if not box:IsVisible() then
+          ChatFrame_OpenChat("", ChatFrame1)
+      end
+      box:SetText(cmd)
+      ChatEdit_SendText(box, false)
+      box:Hide()
+  end
+
+Example: SendCmd(".levelsync status")
+
+The addon should call this whenever the player clicks a button or toggles a
+control. All mod-levelsync commands begin with ".levelsync".
+
+--- Receiving Responses ---
+
+All server responses appear as CHAT_MSG_SYSTEM events. Register a listener:
+
+  local f = CreateFrame("Frame")
+  f:RegisterEvent("CHAT_MSG_SYSTEM")
+  f:SetScript("OnEvent", function(self, event, msg)
+      -- Strip WoW color codes before matching
+      local clean = msg:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+      if clean:find("%[LevelSync%]") then
+          -- parse and handle
+      end
+  end)
+
+IMPORTANT: Responses arrive as separate system messages, one per line. The
+".levelsync status" command produces multiple lines sequentially. You must
+buffer them until the full status block is received.
+
+A status block starts with:
+  [LevelSync] Sync Group #<N>
+and ends when the next non-[LevelSync] message arrives or after a timeout
+(200-300ms is sufficient).
+
+
+================================================================================
+  FULL COMMAND REFERENCE & EXACT SERVER RESPONSE FORMATS
+================================================================================
+
+All player commands require the player to be logged in as a character that
+is or could be part of a sync group. GM commands require SEC_GAMEMASTER.
+
+--------------------------------------------------------------------------------
+.levelsync setkey <key>
+--------------------------------------------------------------------------------
+Sets the account's security key (SHA-256 hashed server-side).
+
+  Response (success):
+    [LevelSync] Account key set.
+
+  No error states — always succeeds.
+
+--------------------------------------------------------------------------------
+.levelsync addaccount <accountname> [key]
+--------------------------------------------------------------------------------
+Links all characters from another account into the calling character's group.
+Key is required unless linking your own account.
+
+  Response (success, no syncs were on):
+    [LevelSync] Linked X character(s) from account 'name'.
+
+  Response (success, level sync was on and turned off):
+    [LevelSync] Linked X character(s) from account 'name'.
+    [LevelSync] Level sync turned OFF — use .levelsync level on to sync.
+
+  Response (success, IP sync was on and turned off):
+    [LevelSync] Linked X character(s) from account 'name'.
+    [LevelSync] IP sync turned OFF — use .levelsync IP on to sync.
+
+  Response (both were on, both turned off):
+    [LevelSync] Linked X character(s) from account 'name'.
+    [LevelSync] Level sync turned OFF — use .levelsync level on to sync.
+    [LevelSync] IP sync turned OFF — use .levelsync IP on to sync.
+
+  Error responses:
+    [LevelSync] Account 'name' not found.
+    [LevelSync] A key is required to link another account.
+    [LevelSync] Invalid key.
+    [LevelSync] That account is already in a different sync group.
+    [LevelSync] Group is full (X/Y accounts).
+    [LevelSync] No characters found on account 'name'.
+    [LevelSync] No new characters were linked from account 'name'.
+
+--------------------------------------------------------------------------------
+.levelsync addchar <charname> [key]
+--------------------------------------------------------------------------------
+Links a single character into the calling character's group.
+Key is required if the character is on a different account.
+
+  Response (success, no syncs were on):
+    [LevelSync] <name> added to sync group.
+
+  Response (success, level sync was on):
+    [LevelSync] <name> added to sync group.
+    [LevelSync] Level sync turned OFF — use .levelsync level on to sync.
+
+  Response (success, IP sync was on):
+    [LevelSync] <name> added to sync group.
+    [LevelSync] IP sync turned OFF — use .levelsync IP on to sync.
+
+  Error responses:
+    [LevelSync] Character 'name' not found.
+    [LevelSync] A key is required to link a character from another account.
+    [LevelSync] Invalid key.
+    [LevelSync] <name> is already in a different sync group.
+    [LevelSync] <name> is already in your sync group.
+    [LevelSync] Group is full (X/Y accounts).
+
+--------------------------------------------------------------------------------
+.levelsync removeaccount <accountname>
+--------------------------------------------------------------------------------
+Removes all characters from an account from the calling character's group.
+
+  Response (success):
+    [LevelSync] Account 'name' removed from sync group.
+
+  Error responses:
+    [LevelSync] You are not in a sync group.
+    [LevelSync] Account 'name' not found.
+    [LevelSync] Account 'name' is not in your sync group.
+
+  Note: Online characters being removed also receive:
+    [LevelSync] Your character has been removed from the sync group.
+
+--------------------------------------------------------------------------------
+.levelsync removechar <charname>
+--------------------------------------------------------------------------------
+Removes a single character from the calling character's group.
+
+  Response (success):
+    [LevelSync] <name> removed from sync group.
+
+  Error responses:
+    [LevelSync] You are not in a sync group.
+    [LevelSync] Character 'name' not found.
+    [LevelSync] <name> is not in your sync group.
+
+  Note: If the removed character is online, they receive:
+    [LevelSync] Your character has been removed from the sync group.
+
+--------------------------------------------------------------------------------
+.levelsync removeall
+--------------------------------------------------------------------------------
+Disbands the entire sync group and removes all keys. If not in a group,
+removes the calling account's key only.
+
+  Response (in a group):
+    [LevelSync] Sync group disbanded. All keys removed.
+
+  Response (not in a group):
+    [LevelSync] You are not in a sync group. Account key removed.
+
+  Note: All online group members receive:
+    [LevelSync] Your sync group has been disbanded.
+
+--------------------------------------------------------------------------------
+.levelsync listaccount <accountname>
+--------------------------------------------------------------------------------
+Lists all characters on an account with their sync group membership.
+
+  Response:
+    [LevelSync] Characters on account 'name':
+      <coloredName> (lv X) (Class) [Group N]     ← in a group
+      <coloredName> (lv X) (Class) [No Group]    ← not in any group
+
+  Error responses:
+    [LevelSync] Account 'name' not found.
+    [LevelSync] No characters on account 'name'.
+
+  Note: Character names appear with WoW class color codes.
+  Regex to parse a character line (after stripping color codes):
+    "^%s+(.-)%s+%(lv (%d+)%)%s+%((.-)%)%s+(%[.-%])"
+  Groups: name, level, class, group_status
+
+--------------------------------------------------------------------------------
+.levelsync status
+--------------------------------------------------------------------------------
+Shows the calling character's sync group summary and all members.
+
+  Full response (multi-line):
+    [LevelSync] Sync Group #<N>
+      Accounts: X/Y
+      Level sync: ON|OFF
+      Progression sync: ON|OFF
+    [LevelSync] Group members:
+      Account <accountId>:
+        <coloredName> (lvl X) (Class) IP Tier: None
+        <coloredName> (lvl X) (Class) IP Tier: N - TierName
+      Account <accountId>:
+        ...
+
+  Error responses:
+    [LevelSync] You are not in a sync group.
+    [LevelSync] Module is disabled.
+
+  Parsing notes:
+  - "Sync Group #(%d+)" → group ID
+  - "Accounts: (%d+)/(%d+)" → current/max accounts
+  - "Level sync: (ON|OFF)" → level sync state
+  - "Progression sync: (ON|OFF)" → IP sync state
+  - "Account (%d+):" → account ID header (new account section)
+  - After stripping color codes, character lines match:
+    "^%s+(.-)%s+%(lvl (%d+)%)%s+%((.-)%)%s+IP Tier: (.+)$"
+    Groups: name, level, class, ip_tier_string
+    ip_tier_string is either "None" or "N - TierName"
+
+--------------------------------------------------------------------------------
+.levelsync level on|off
+--------------------------------------------------------------------------------
+Toggles level sync for the group.
+
+  Response (on):
+    [LevelSync] Level sync enabled.
+    [LevelSync] Syncing group to highest level...
+
+  Response (off):
+    [LevelSync] Level sync disabled.
+
+  Error responses:
+    [LevelSync] You are not in a sync group.
+    [LevelSync] Level sync is disabled by the server.
+    [LevelSync] Module is disabled.
+
+--------------------------------------------------------------------------------
+.levelsync IP on|off
+--------------------------------------------------------------------------------
+Toggles IP (Individual Progression) sync for the group.
+Requires LevelSync.AllowProgressionSync = 1 on the server.
+
+  Response (on):
+    [LevelSync] Progression sync enabled.
+    [LevelSync] Syncing group progression...
+
+  Response (off):
+    [LevelSync] Progression sync disabled.
+
+  Error responses:
+    [LevelSync] You are not in a sync group.
+    [LevelSync] Progression sync is disabled by the server.
+    [LevelSync] Module is disabled.
+
+--------------------------------------------------------------------------------
+.levelsync gm removeall <charname>       [GM ONLY — SEC_GAMEMASTER]
+--------------------------------------------------------------------------------
+Disbands the sync group belonging to the named character.
+Character name is case-insensitive. If not in a group, removes key only.
+
+  Response (full disband):
+    [LevelSync] Group #N fully disbanded. All keys removed.
+
+  Response (not in group):
+    [LevelSync] '<name>' is not in a sync group. Account key removed.
+
+  Error responses:
+    [LevelSync] Character 'name' not found.
+
+--------------------------------------------------------------------------------
+.levelsync gm unlinkall <accountname>    [GM ONLY — SEC_GAMEMASTER]
+--------------------------------------------------------------------------------
+Same as gm removeall but targets by account name.
+
+  Response (success):
+    [LevelSync] Group #N fully disbanded.
+
+  Error responses:
+    [LevelSync] Account 'name' not found.
+    [LevelSync] Account 'name' is not in any sync group.
+
+
+================================================================================
+  PASSIVE SYNC NOTIFICATIONS (received without sending a command)
+================================================================================
+
+These arrive when the server syncs the current character automatically.
+The addon should watch for them and refresh its displayed data when seen.
+
+  Level updated by sync:
+    [LevelSync] Your level has been updated to X by the group sync.
+    (Color prefix: |cff00ff00[LevelSync]|r)
+
+  IP tier updated by sync:
+    [LevelSync] Your progression tier has been updated to X by the group sync.
+    (Color prefix: |cff00ff00[LevelSync]|r)
+
+  Removed from group by another member:
+    [LevelSync] Your character has been removed from the sync group.
+
+  Group disbanded by another member:
+    [LevelSync] Your sync group has been disbanded.
+
+  Group disbanded by a GM:
+    [LevelSync] Your sync group has been disbanded by a GM.
+
+
+================================================================================
+  SUGGESTED UI LAYOUT
+================================================================================
+
+Main Panel (collapsible, draggable):
+  Title bar: "LevelSync" with a minimize button
+
+  --- Status Section ---
+  Group ID:         Sync Group #1          (or "Not in a group")
+  Accounts:         3 / 6
+  Level Sync:       [ON]  [OFF]            (clickable toggle buttons)
+  IP Sync:          [ON]  [OFF]            (clickable toggle buttons)
+
+  --- Member List ---
+  Scrollable list of all group members:
+    Each row: [class color icon] Name    lvl XX   Class   IP: TierName
+    Members grouped under their account ID as a sub-header
+    Highlight the current character's row
+
+  --- Action Buttons ---
+  [Refresh Status]   — calls .levelsync status
+  [Add Account]      — opens a small input dialog: account name + key
+  [Add Character]    — opens a small input dialog: char name + key
+  [Remove All]       — confirmation dialog before calling .levelsync removeall
+
+  --- Key Management (collapsible sub-panel) ---
+  [Set My Key]       — input field + button
+
+Minimap button or LDB launcher to open/close the panel.
+
+Slash command to open: /lsync or /levelsync
+
+
+================================================================================
+  IMPORTANT IMPLEMENTATION NOTES
+================================================================================
+
+1. MULTI-LINE STATUS BUFFERING
+   The .levelsync status command sends ~10-20 system messages in rapid
+   succession. Build a state machine that:
+   - Sets a flag when "[LevelSync] Sync Group #" is seen
+   - Accumulates all following [LevelSync] lines
+   - Commits and renders the data after 250ms of no new [LevelSync] messages
+
+2. COLOR CODE STRIPPING
+   All character names in output are wrapped in WoW color codes:
+     |cffRRGGBB<name>|r
+   Strip these before pattern matching:
+     local clean = msg:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+   You can separately extract the color for display if desired.
+
+3. SENDING COMMANDS WHILE CHAT IS OPEN
+   If the player already has the chat box open, SetText + ChatEdit_SendText
+   will replace their current input. Consider hiding the addon input dialogs
+   or queuing commands until the chat box is closed.
+
+4. ACCOUNT ID vs ACCOUNT NAME
+   The status output shows numeric account IDs in "Account <ID>:" headers,
+   not account names. The addon cannot resolve these to names without a
+   separate .levelsync listaccount call. Display as "Account 105" or group
+   them visually without naming the account.
+
+5. ERROR STATE HANDLING
+   Always check for "[LevelSync] You are not in a sync group." and update
+   the panel to show an empty/joined state. This can arrive at any time if
+   another player disbands the group.
+
+6. IP SYNC AVAILABILITY
+   The server may have AllowProgressionSync = 0. In this case, clicking
+   the IP toggle will produce:
+     [LevelSync] Progression sync is disabled by the server.
+   Gray out the IP toggle buttons if this response is received.
+   There is no pre-flight way to know server config; detect it reactively.
+
+7. NO REAL-TIME UPDATES
+   The addon has no server-push mechanism. Group state only updates when:
+     a) The player sends .levelsync status
+     b) A passive notification arrives (sync applied, removed, disbanded)
+   When a passive sync notification is received, auto-call .levelsync status
+   to refresh the panel. Add a short delay (500ms) so the server has time
+   to finish all DB writes before the status query.
+
+8. GM COMMANDS
+   Only show GM section if the player has GM flag active (UnitIsGM("player")
+   or check for the GM badge). GM input takes a character name only (no
+   account name option in the charname version).
+
+
+================================================================================
+  IP TIER LOOKUP TABLE (for display in addon)
+================================================================================
+
+local TIER_NAMES = {
+    [0]  = "None",
+    [1]  = "Molten Core",
+    [2]  = "Onyxia",
+    [3]  = "Blackwing Lair",
+    [4]  = "Pre-AQ",
+    [5]  = "AQ War Effort",
+    [6]  = "Ahn'Qiraj",
+    [7]  = "Naxxramas 40",
+    [8]  = "Pre-TBC",
+    [9]  = "Karazhan / Gruul / Magtheridon",
+    [10] = "Serpentshrine Cavern / Tempest Keep",
+    [11] = "Hyjal Summit / Black Temple",
+    [12] = "Zul'Aman",
+    [13] = "Sunwell Plateau",
+    [14] = "Naxxramas / Eye of Eternity / Obsidian Sanctum",
+    [15] = "Ulduar",
+    [16] = "Trial of the Crusader",
+    [17] = "Icecrown Citadel",
+    [18] = "Ruby Sanctum",
+}
+
+
+================================================================================
+  CLASS COLOR TABLE (matching in-game class colors, for member list display)
+================================================================================
+
+local CLASS_COLORS = {
+    ["Warrior"]     = "C79C6E",
+    ["Paladin"]     = "F58CBA",
+    ["Hunter"]      = "ABD473",
+    ["Rogue"]       = "FFF569",
+    ["Priest"]      = "FFFFFF",
+    ["Death Knight"]= "C41F3B",
+    ["Shaman"]      = "0070DE",
+    ["Mage"]        = "69CCF0",
+    ["Warlock"]     = "9482C9",
+    ["Druid"]       = "FF7D0A",
+}
+
+
+================================================================================
+  MINIMAL ADDON SKELETON (Lua)
+================================================================================
+
+-- LevelSync.lua
+local ADDON_NAME = "LevelSync"
+local PREFIX = "[LevelSync]"
+
+-- Command sender
+local function Cmd(str)
+    local box = ChatFrame1EditBox
+    if not box:IsVisible() then ChatFrame_OpenChat("", ChatFrame1) end
+    box:SetText(".levelsync " .. str)
+    ChatEdit_SendText(box, false)
+    box:Hide()
+end
+
+-- Status request
+local function RefreshStatus()
+    Cmd("status")
+end
+
+-- Response listener
+local listener = CreateFrame("Frame")
+listener:RegisterEvent("CHAT_MSG_SYSTEM")
+listener:SetScript("OnEvent", function(self, event, msg)
+    local clean = msg:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    if not clean:find("%[LevelSync%]") then return end
+
+    -- Passive sync notifications — refresh after delay
+    if clean:find("has been updated to") or
+       clean:find("has been disbanded") or
+       clean:find("has been removed") then
+        C_Timer.After(0.5, RefreshStatus)
+        return
+    end
+
+    -- Status block parsing
+    local groupId = clean:match("Sync Group #(%d+)")
+    if groupId then
+        -- begin buffering status lines
+        -- (implement state machine here)
+    end
+end)
+
+-- Slash command
+SLASH_LEVELSYNC1 = "/lsync"
+SLASH_LEVELSYNC2 = "/levelsync"
+SlashCmdList["LEVELSYNC"] = function(msg)
+    -- toggle panel or pass subcommands
+    if msg == "" then
+        -- toggle main panel
+    else
+        Cmd(msg)
+    end
+end
+
+================================================================================

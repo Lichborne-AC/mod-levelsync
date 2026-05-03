@@ -1,0 +1,36 @@
+################################################################################
+# mod-levelsync configuration
+################################################################################
+
+[worldserver]
+
+# Enable or disable the module entirely.
+# Default: 1 (enabled)
+LevelSync.Enable = 1
+
+# Allow level synchronisation within groups.
+# Default: 1 (enabled)
+LevelSync.AllowLevelSync = 1
+
+# Allow progression synchronisation within groups.
+# Default: 0 (disabled)
+LevelSync.AllowProgressionSync = 0
+
+# Maximum number of accounts allowed per sync group (1-10).
+# Default: 6
+LevelSync.MaxLinkedAccounts = 6
+
+# USE Death Knights as a sync source for characters below level 55.
+# When enabled, a DK in the group will cause sub-55 characters to be
+# boosted. Once all characters reach 55+ the DK participates normally.
+# Default: 0 (disabled, DK does not boost to 55)
+#          1 (enabled, DK boosts to level 55)
+LevelSync.DeathKnightException = 0
+
+# Allow Death Knights to sync IP tiers to characters below tier 13.
+# DKs start at tier 13 (end of TBC). When enabled, a DK in the group
+# will boost sub-tier-13 characters up. Once all characters reach tier 13+
+# the DK participates normally.
+# Default: 0 (disabled, DK does not boost IP tiers below 13)
+#          1 (enabled, DK boosts to tier 13)
+LevelSync.DeathKnightIPException = 0
