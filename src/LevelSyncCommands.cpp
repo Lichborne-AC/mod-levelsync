@@ -618,6 +618,9 @@ public:
             "WHERE m.group_id = {} AND c.account = {}",
             groupId, targetAccountId);
 
+        CharacterDatabase.Execute(
+            "DELETE FROM levelsync_account_keys WHERE account_id = {}", targetAccountId);
+
         handler->PSendSysMessage("[LevelSync] Account '{}' removed from sync group.", accountArg);
         return true;
     }
@@ -652,14 +655,15 @@ public:
 
         std::string charName(nameArg);
         QueryResult charResult = CharacterDatabase.Query(
-            "SELECT guid FROM characters WHERE LOWER(name) = LOWER('{}')", EscChar(charName));
+            "SELECT guid, account FROM characters WHERE LOWER(name) = LOWER('{}')", EscChar(charName));
         if (!charResult)
         {
             handler->PSendSysMessage("[LevelSync] Character '{}' not found.", charName);
             return true;
         }
 
-        uint32 targetGuid  = charResult->Fetch()[0].Get<uint32>();
+        uint32 targetGuid      = charResult->Fetch()[0].Get<uint32>();
+        uint32 targetAccountId = charResult->Fetch()[1].Get<uint32>();
         uint32 targetGroup = sLevelSync->GetGroupId(targetGuid);
 
         if (targetGroup != groupId)
@@ -675,6 +679,15 @@ public:
 
         CharacterDatabase.Execute(
             "DELETE FROM levelsync_members WHERE char_guid = {}", targetGuid);
+
+        // Remove key if this was the account's last character in the group
+        QueryResult remaining = CharacterDatabase.Query(
+            "SELECT 1 FROM levelsync_members m JOIN characters c ON m.char_guid = c.guid "
+            "WHERE m.group_id = {} AND c.account = {} LIMIT 1",
+            groupId, targetAccountId);
+        if (!remaining)
+            CharacterDatabase.Execute(
+                "DELETE FROM levelsync_account_keys WHERE account_id = {}", targetAccountId);
 
         handler->PSendSysMessage("[LevelSync] {} removed from sync group.", charName);
         return true;
