@@ -12,8 +12,8 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 - **Multi-account groups** — Up to 6 accounts (configurable) can be linked into a single sync group. Each account can have up to 10 characters.
 - **Upward-only** — Sync never lowers Level/IP levels. If the group highest is level 10, no one gets set below 10.
 - **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by players in the module group. Adding a new character automatically turns syncs OFF.  The group manually re-enables after everyone is added. (prevents accidental edits)
-- **Death Knight exception (level)** — Optional: Default ON. prevents a DK (who starts at level 55) from forcing all sub level 55 characters to level 55. DK only participates as a sync source once all characters are 55+.
-- **Death Knight exception (IP)** — Optional: Default ON. Same logic for IP tiers. IP tier 13, Sunwell Plateau.
+- **Death Knight exception (level)** — Optional: Default OFF. When disabled (0), a DK is excluded as a sync source for characters below level 55 — prevents a fresh DK from forcing all sub-55 characters to level 55. When enabled (1), DKs participate normally and can boost sub-55 characters.
+- **Death Knight exception (IP)** — Optional: Default OFF. Same logic for IP tiers using tier 13 (Sunwell Plateau) as the threshold.
 - **GM commands** — Server admins can remove any sync group by character name. GM commands disbands the module group and clears all databases, including passkeys. (full reset)
 - **Secure key system** — SHA-256 hashed keys are required to link accounts, preventing unauthorized linking.
 - **Auto orphan cleanup** — On every server startup, any levelsync data referencing deleted characters is automatically pruned. Empty groups and dangling keys are removed silently — no manual DB maintenance required.
@@ -62,10 +62,10 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 |--------|---------|-------------|
 | `LevelSync.Enable` | `1` | Enable or disable the module entirely |
 | `LevelSync.AllowLevelSync` | `1` | Allow players to use level sync |
-| `LevelSync.AllowProgressionSync` | `0` | Allow players to use IP sync (requires mod-individual-progression) |
+| `LevelSync.AllowProgressionSync` | `1` | Allow players to use IP sync (requires mod-individual-progression) |
 | `LevelSync.MaxLinkedAccounts` | `6` | Maximum accounts per sync group (1–10) |
-| `LevelSync.DeathKnightException` | `0` | Prevent DKs from boosting non-DK characters below level 55 |
-| `LevelSync.DeathKnightIPException` | `0` | Prevent DKs from boosting non-DK characters below IP tier 13 |
+| `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (0 = excluded, 1 = participates normally) |
+| `LevelSync.DeathKnightIPException` | `0` | Allow DKs to boost non-DK characters below IP tier 13 (0 = excluded, 1 = participates normally) |
 
 ---
 
@@ -104,7 +104,7 @@ Use `.levelsync addaccount <account>` or `.levelsync addchar <name1, name2, name
 
 ### Death Knight Exception
 
-When `LevelSync.DeathKnightException = 1`, a DK is excluded as a sync *source* for characters below level 55. The DK can still be synced *up* by non-DK characters. Once all non-DK characters in the group are 55+, the DK participates normally. The same logic applies to `LevelSync.DeathKnightIPException` using tier 13 as the threshold.
+When `LevelSync.DeathKnightException = 0` (default), a DK is excluded as a sync *source* for characters below level 55 — it will not push its level 55 to sub-55 group members. The DK can still be synced *up* by non-DK characters. Once all non-DK characters in the group reach 55+, the DK participates normally as a sync source. When set to `1`, DKs participate immediately and can boost sub-55 characters. The same logic applies to `LevelSync.DeathKnightIPException` using tier 13 as the threshold.
 
 ---
 
