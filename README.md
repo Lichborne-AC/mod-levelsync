@@ -87,7 +87,7 @@ IP tier data is stored in the existing `character_queststatus_rewarded` table us
 
 ### Adding Characters
 
-Use `.levelsync addaccount <account>` or `.levelsync addchar <name1, name2, name3>` to add a new member/account to the module group.  **both level sync and IP sync are turned OFF by default**. This prevents the new character from being immediately boosted before the player is ready. Enable with `.levelsync level on` and/or `.levelsync IP on` after all members have been added.
+Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a new member/account to the module group.  **both level sync and IP sync are turned OFF by default**. This prevents the new character from being immediately boosted before the player is ready. Enable with `.levelsync level on` and/or `.levelsync IP on` after all members have been added.
 
 ### Triggers
 
