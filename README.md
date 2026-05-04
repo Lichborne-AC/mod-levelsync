@@ -189,8 +189,9 @@ Used with mod-individual-progression. Tiers are stored as hidden quest IDs in `c
 
 ## UI Addon
 
-https://github.com/Lichborne-AC/mod-levelsync
-A companion UI addon for levelsync (recommended but not required). Provides a graphical interface for managing your sync group, and viewing member status. 
+A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon.
+
+https://github.com/Lichborne-AC/LevelsyncUI
 
 ---
 
