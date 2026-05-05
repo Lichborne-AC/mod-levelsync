@@ -6,10 +6,10 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 
 ## Features
 
-- **Level Sync** — Adds characters to module. When members levels up, all other members are instantly brought to the same level. Works for online characters in real-time and offline characters via direct DB update. (Characters do not sync down)
+- **Level Sync** — When members levels up, all other members are instantly brought to the same level. Works for online characters in real-time and offline characters via direct DB update. (Characters do not sync down)
 - **XP Sync** — On logout, character's current XP is written to all offline group members at the same level, keeping progress consistent.
 - **IP Sync** — Syncs Individual Progression tiers (mod-individual-progression) across the group using the same upward-only logic as level sync. (will not sync down)
-- **Multi-account groups** — Up to 6 accounts (configurable) can be linked into a single sync group. Each account can have up to 10 characters.
+- **Multi-account groups** — Up to 10 accounts (configurable)(default 6) can be linked into a single sync group. Each account can have up to 10 characters.
 - **Upward-only** — Sync never lowers Level/IP levels. If the group highest is level 10, no one gets set below 10.
 - **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by players in the module group. Adding a new character automatically turns syncs OFF. The group manually re-enables after everyone is added. (prevents accidental edits)
 - **Auto-status response** — Every add, remove, and sync toggle command automatically prints the full group status followed by a confirmation line, so you always see the current state of the group after any change.
@@ -65,7 +65,7 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 | `LevelSync.AllowLevelSync` | `1` | Allow players to use level sync |
 | `LevelSync.AllowProgressionSync` | `1` | Allow players to use IP sync (requires mod-individual-progression) |
 | `LevelSync.MaxLinkedAccounts` | `6` | Maximum accounts per sync group (1–10) |
-| `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (0 = excluded, 1 = participates normally) |
+| `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (0 = excluded, 1 = participates normally) | 
 | `LevelSync.DeathKnightIPException` | `0` | Allow DKs to boost non-DK characters below IP tier 13 (0 = excluded, 1 = participates normally) |
 
 ---
@@ -94,7 +94,7 @@ Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a ne
 
 | Event | Level Sync | IP Sync |
 |-------|-----------|---------|
-| Player logs in | Syncs the player up to the group's highest level. Syncs all online and offline members to the highest level in the group. | Same logic for IP tier. |
+| Turn Sync | Syncs the player up to the group's highest level. Syncs all online and offline members to the highest level in the group. | Same logic for IP tier. |
 | Player logs out | Pushes the logging-out player's level and XP to all other group members (online in-memory, offline via DB). Never reduces levels. | Pushes the logging-out player's IP tier to all other group members. Never reduces IP tiers. |
 | Player levels up | Immediately pushes new level to all online members. Offline members are updated in DB. | N/A (IP has no equivalent automatic event; tier changes use `OnPlayerCompleteQuest`). |
 | IP tier advances (quest reward) | N/A | `OnPlayerCompleteQuest` fires for quest IDs 66001–66018. Pushes new tier to all group members. |
@@ -115,13 +115,14 @@ All commands begin with `.levelsync`.
 
 | Command | Description |
 |---------|-------------|
-| `.levelsync setkey <key>` | Set a security key for your account. Other players need this key to link your account to their group. Keys persist until overwritten — no need to reset after leaving a group. |
-| `.levelsync addaccount <account> [key]` | Link all characters from another account into your sync group. Key is required unless linking your own account. |
+| `.levelsync setkey <key>` | Set a security key for your account. Other players need this key to link your account to their group. Keys persist until overwritten. |
+| `.levelsync addaccount <account> [key]` | Link all characters from another account into your sync group. |
 | `.levelsync addchar <charname> [key]` | Link a single character into your sync group. Key is required if the character is on a different account. |
-| `.levelsync removeaccount <account>` | Remove all characters from an account from your sync group. Account key is preserved. |
-| `.levelsync removechar <charname>` | Remove a single character from your sync group. Account key is preserved. |
-| `.levelsync removeall` | Disband your entire sync group. All account keys are preserved. If not in a group, does nothing. |
-| `.levelsync disbandaccount` | Disband every sync group associated with any character on your account. Works even if the character you are logged in on is not personally in a group. Account keys are preserved. |
+| `.levelsync removeaccount <account>` | Remove all characters from an account from your sync group by account name. |
+| `.levelsync removeaccount # <accountid>` | Remove all characters from an account by numeric account ID (e.g. `# 105`). |
+| `.levelsync removechar <charname>` | Remove a single character from your sync group. |
+| `.levelsync removeall` | Disband your entire sync group. |
+| `.levelsync disbandaccount` | Disband every sync group associated with any character on your account. Works even if the character you are logged in on is not personally in a group. |
 | `.levelsync listaccount <account> [key]` | Show all characters on an account with their level, class, and group status. Key is required when viewing another account — not required for your own. |
 
 ### Status & Toggles
@@ -129,10 +130,12 @@ All commands begin with `.levelsync`.
 | Command | Description |
 |---------|-------------|
 | `.levelsync status` | Show your sync group summary: group ID, account count, sync states, and all members with level, class, and IP tier. |
-| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling immediately syncs all members to the current highest level. Prints full group status after the change. |
-| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling immediately syncs all members to the current highest IP tier. Requires `LevelSync.AllowProgressionSync = 1` on the server. Prints full group status after the change. |
+| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling immediately syncs all members to the current highest level. |
+| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling immediately syncs all members to the current highest IP tier. |
 
 ### Status Output Example
+
+In-game the output appears with color coding: `[LevelSync]` in green, ON in green, OFF in red, character names in class color, class names in gold, and IP tier labels in tier-specific colors. Shown here in plain text:
 
 ```
 [LevelSync] Sync Group #1
@@ -196,4 +199,4 @@ Used with mod-individual-progression. Tiers are stored as hidden quest IDs in `c
 
 ## License
 
-GPL v2 — same as AzerothCore.
+GPL v2 
