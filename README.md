@@ -144,7 +144,7 @@ All commands begin with `.levelsync`.
   Account 105: Characters: 3
     Aone (lvl 60) (Warrior) IP Tier: 7 - Naxxramas 40
     Atwo (lvl 60) (Paladin) IP Tier: 7 - Naxxramas 40
-    Athree (lvl 55) (Death Knight) IP Tier: 13 - Sunwell Plateau
+    Athree (lvl 60) (Death Knight) IP Tier: 13 - Sunwell Plateau
   Account 106: Characters: 3
     Bone (lvl 60) (Hunter) IP Tier: 7 - Naxxramas 40
     ...
