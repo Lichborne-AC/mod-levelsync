@@ -477,9 +477,9 @@ public:
             DisplayGroupStatus(handler, groupId);
             handler->PSendSysMessage("|cff00ff00[LevelSync]|r Linked {} character(s) from account '{}'.", linked, accountArg);
             if (levelWasOn)
-                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned OFF — use .levelsync level on to sync.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned |cffff0000OFF|r — use .levelsync level on to sync.");
             if (ipWasOn)
-                handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned OFF — use .levelsync IP on to sync.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned |cffff0000OFF|r — use .levelsync IP on to sync.");
         }
         else
             handler->PSendSysMessage("|cff00ff00[LevelSync]|r No new characters were linked from account '{}'.", accountArg);
@@ -598,15 +598,16 @@ public:
         DisplayGroupStatus(handler, groupId);
         handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} added to sync group.", CapFirst(charName));
         if (levelWasOn)
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned OFF — use .levelsync level on to sync.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned |cffff0000OFF|r — use .levelsync level on to sync.");
         if (ipWasOn)
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned OFF — use .levelsync IP on to sync.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned |cffff0000OFF|r — use .levelsync IP on to sync.");
 
         return true;
     }
 
     // -------------------------------------------------------------------
     // .levelsync removeaccount <account>
+    // .levelsync removeaccount # <accountid>
     // -------------------------------------------------------------------
     static bool HandleRemoveAccountCommand(ChatHandler* handler, char const* args)
     {
@@ -619,7 +620,7 @@ public:
         char* accountArg = strtok(const_cast<char*>(args), " ");
         if (!accountArg)
         {
-            handler->PSendSysMessage("Usage: .levelsync removeaccount <account>");
+            handler->PSendSysMessage("Usage: .levelsync removeaccount <account> or .levelsync removeaccount # <accountid>");
             return true;
         }
 
@@ -633,11 +634,34 @@ public:
             return true;
         }
 
-        uint32 targetAccountId = GetAccountIdByName(std::string(accountArg));
-        if (!targetAccountId)
+        uint32 targetAccountId = 0;
+        std::string displayName;
+
+        if (std::string(accountArg) == "#")
         {
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' not found.", accountArg);
-            return true;
+            char* idArg = strtok(nullptr, " ");
+            if (!idArg)
+            {
+                handler->PSendSysMessage("Usage: .levelsync removeaccount # <accountid>");
+                return true;
+            }
+            targetAccountId = static_cast<uint32>(std::strtoul(idArg, nullptr, 10));
+            if (!targetAccountId)
+            {
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Invalid account ID.");
+                return true;
+            }
+            displayName = std::string(idArg);
+        }
+        else
+        {
+            targetAccountId = GetAccountIdByName(std::string(accountArg));
+            if (!targetAccountId)
+            {
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' not found.", accountArg);
+                return true;
+            }
+            displayName = std::string(accountArg);
         }
 
         // Notify online members being removed
@@ -649,7 +673,7 @@ public:
 
         if (!toRemove)
         {
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' is not in your sync group.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' is not in your sync group.", displayName);
             return true;
         }
 
@@ -668,7 +692,7 @@ public:
             groupId, targetAccountId);
 
         DisplayGroupStatus(handler, groupId);
-        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' removed from sync group.", accountArg);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' removed from sync group.", displayName);
         return true;
     }
 
