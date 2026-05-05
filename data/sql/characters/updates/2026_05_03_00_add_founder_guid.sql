@@ -10,13 +10,22 @@
 -- DESC LIMIT 1 to find the most recently created group for that founder.
 -- This works regardless of which connection serves the SELECT.
 --
--- founder_guid is only read during the lookup step inside CreateGroup().
--- After group creation it is not authoritative — players may leave the
--- group, and the founder_guid column may end up referencing a deleted
--- character. That's intentional and harmless.
+-- Idempotent: skips the ALTER if the column already exists (safe for fresh
+-- installs where the base schema already includes founder_guid).
 
-ALTER TABLE `levelsync_groups`
-    ADD COLUMN `founder_guid` INT UNSIGNED NOT NULL DEFAULT 0
-        COMMENT 'char_guid used to look up the row immediately after INSERT; not authoritative after group creation'
-        AFTER `group_id`,
-    ADD KEY `idx_founder` (`founder_guid`);
+SET @dbname = DATABASE();
+SET @preparedStatement = (
+    SELECT IF(
+        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = @dbname
+           AND TABLE_NAME   = 'levelsync_groups'
+           AND COLUMN_NAME  = 'founder_guid') > 0,
+        'SELECT 1',
+        'ALTER TABLE `levelsync_groups`
+             ADD COLUMN `founder_guid` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `group_id`,
+             ADD KEY `idx_founder` (`founder_guid`)'
+    )
+);
+PREPARE alterIfNotExists FROM @preparedStatement;
+EXECUTE alterIfNotExists;
+DEALLOCATE PREPARE alterIfNotExists;
