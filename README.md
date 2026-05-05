@@ -156,7 +156,7 @@ All commands begin with `.levelsync`.
 
 | Command | Description |
 |---------|-------------|
-| `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to and remove all associated account keys. If the character is not in a group, removes their account key only. This is the only command that deletes account keys. |
+| `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to and remove all associated account keys. If the character is not in a group, removes their account key only. |
 
 ---
 
