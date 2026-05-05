@@ -11,12 +11,13 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 - **IP Sync** — Syncs Individual Progression tiers (mod-individual-progression) across the group using the same upward-only logic as level sync. (will not sync down)
 - **Multi-account groups** — Up to 6 accounts (configurable) can be linked into a single sync group. Each account can have up to 10 characters.
 - **Upward-only** — Sync never lowers Level/IP levels. If the group highest is level 10, no one gets set below 10.
-- **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by players in the module group. Adding a new character automatically turns syncs OFF.  The group manually re-enables after everyone is added. (prevents accidental edits)
+- **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by players in the module group. Adding a new character automatically turns syncs OFF. The group manually re-enables after everyone is added. (prevents accidental edits)
+- **Auto-status response** — Every add, remove, and sync toggle command automatically prints the full group status followed by a confirmation line, so you always see the current state of the group after any change.
 - **Death Knight exception (level)** — Optional: Default OFF. When disabled (0), a DK is excluded as a sync source for characters below level 55 — prevents a fresh DK from forcing all sub-55 characters to level 55. When enabled (1), DKs participate normally and can boost sub-55 characters.
 - **Death Knight exception (IP)** — Optional: Default OFF. Same logic for IP tiers using tier 13 (Sunwell Plateau) as the threshold.
-- **GM commands** — Server admins can remove any sync group by character name. GM commands disbands the module group and clears all databases, including passkeys. (full reset)
-- **Secure key system** — SHA-256 hashed keys are required to link accounts, preventing unauthorized linking.
-- **Auto orphan cleanup** — On every server startup, any levelsync data referencing deleted characters is automatically pruned. Empty groups and dangling keys are removed silently — no manual DB maintenance required.
+- **GM commands** — Server admins can fully disband any sync group by character name, including clearing all associated account keys. (full reset)
+- **Secure key system** — SHA-256 hashed keys are required to link accounts, preventing unauthorized linking. Keys persist until overwritten or a GM clears them — no need to re-run setkey after removing characters from a group.
+- **Auto orphan cleanup** — On every server startup, any levelsync data referencing deleted characters is automatically pruned. Empty groups are removed silently — no manual DB maintenance required.
 
 ---
 
@@ -77,7 +78,7 @@ All tables are added to `acore_characters`. No core tables are modified.
 |-------|---------|
 | `levelsync_groups` | One row per sync group. Stores `level_sync_enabled` and `sync_progression` flags. |
 | `levelsync_members` | One row per character in a group. Links `char_guid` and `account_id` to a `group_id`. |
-| `levelsync_account_keys` | Stores the SHA-256 hashed security key per account. Required to link accounts. |
+| `levelsync_account_keys` | Stores the SHA-256 hashed security key per account. Required to link accounts. One row per account maximum. |
 
 IP tier data is stored in the existing `character_queststatus_rewarded` table using hidden quest IDs 66001–66018 (mod-individual-progression's format). mod-levelsync does not add any IP-specific tables.
 
@@ -87,20 +88,18 @@ IP tier data is stored in the existing `character_queststatus_rewarded` table us
 
 ### Adding Characters
 
-Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a new member/account to the module group.  **both level sync and IP sync are turned OFF by default**. This prevents the new character from being immediately boosted before the player is ready. Enable with `.levelsync level on` and/or `.levelsync IP on` after all members have been added.
+Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a new member/account to the module group. **Both level sync and IP sync are turned OFF by default**. This prevents the new character from being immediately boosted before the player is ready. Enable with `.levelsync level on` and/or `.levelsync IP on` after all members have been added.
 
 ### Triggers
 
 | Event | Level Sync | IP Sync |
 |-------|-----------|---------|
-| Player logs in | Syncs the player up to module groups highest character. Syncs all online members and offline members to highest level in module group. | Same logic for IP tier. |
-| Player logs out | Pushes the logging-out player's level and XP to all other group members (online in-memory, offline via DB) Never reduces levels. | Pushes the logging-out player's IP tier to all other group members.  Never reduces IP Tiers |
+| Player logs in | Syncs the player up to the group's highest level. Syncs all online and offline members to the highest level in the group. | Same logic for IP tier. |
+| Player logs out | Pushes the logging-out player's level and XP to all other group members (online in-memory, offline via DB). Never reduces levels. | Pushes the logging-out player's IP tier to all other group members. Never reduces IP tiers. |
 | Player levels up | Immediately pushes new level to all online members. Offline members are updated in DB. | N/A (IP has no equivalent automatic event; tier changes use `OnPlayerCompleteQuest`). |
-| IP tier advances (quest reward) | N/A | `OnPlayerCompleteQuest` fires for quest IDs 66001–66018. Pushes new tier to all module group members. |
+| IP tier advances (quest reward) | N/A | `OnPlayerCompleteQuest` fires for quest IDs 66001–66018. Pushes new tier to all group members. |
 | `.levelsync level on` | Syncs all group members to the current highest level at the moment of toggle. | — |
 | `.levelsync IP on` | — | Syncs all group members to the current highest IP tier at the moment of toggle. |
-
-
 
 ### Death Knight Exception
 
@@ -116,36 +115,38 @@ All commands begin with `.levelsync`.
 
 | Command | Description |
 |---------|-------------|
-| `.levelsync setkey <key>` | Set a security key for your account. Other players need this key to link your account to their group. |
+| `.levelsync setkey <key>` | Set a security key for your account. Other players need this key to link your account to their group. Keys persist until overwritten — no need to reset after leaving a group. |
 | `.levelsync addaccount <account> [key]` | Link all characters from another account into your sync group. Key is required unless linking your own account. |
 | `.levelsync addchar <charname> [key]` | Link a single character into your sync group. Key is required if the character is on a different account. |
-| `.levelsync removeaccount <account>` | Remove all characters from an account from your sync group. |
-| `.levelsync removechar <charname>` | Remove a single character from your sync group. |
-| `.levelsync removeall` | Disband your entire sync group and remove all linked keys. If not in a group, removes your account key only. |
-| `.levelsync listaccount <account>` | Show all characters on an account and whether they are in a sync group. |
+| `.levelsync removeaccount <account>` | Remove all characters from an account from your sync group. Account key is preserved. |
+| `.levelsync removechar <charname>` | Remove a single character from your sync group. Account key is preserved. |
+| `.levelsync removeall` | Disband your entire sync group. All account keys are preserved. If not in a group, does nothing. |
+| `.levelsync disbandaccount` | Disband every sync group associated with any character on your account. Works even if the character you are logged in on is not personally in a group. Account keys are preserved. |
+| `.levelsync listaccount <account> [key]` | Show all characters on an account with their level, class, and group status. Key is required when viewing another account — not required for your own. |
 
 ### Status & Toggles
 
 | Command | Description |
 |---------|-------------|
 | `.levelsync status` | Show your sync group summary: group ID, account count, sync states, and all members with level, class, and IP tier. |
-| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling immediately syncs all members to the current highest level. |
-| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling immediately syncs all members to the current highest IP tier. Requires `LevelSync.AllowProgressionSync = 1` on the server. |
+| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling immediately syncs all members to the current highest level. Prints full group status after the change. |
+| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling immediately syncs all members to the current highest IP tier. Requires `LevelSync.AllowProgressionSync = 1` on the server. Prints full group status after the change. |
 
 ### Status Output Example
 
 ```
 [LevelSync] Sync Group #1
   Accounts: 3/6
+  Total Characters: 9
   Level sync: ON
   Progression sync: ON
 [LevelSync] Group members:
-  Account 105:
-    Test (lvl 60) (Warrior) IP Tier: 7 - Naxxramas 40
-    Testtwo (lvl 60) (Paladin) IP Tier: 7 - Naxxramas 40
-    Testthree (lvl 60) (Death Knight) IP Tier: 7 - Naxxramas 40
-  Account 106:
-    Testfour (lvl 60) (Shaman) IP Tier: 7 - Naxxramas 40
+  Account 105: Characters: 3
+    Aone (lvl 60) (Warrior) IP Tier: 7 - Naxxramas 40
+    Atwo (lvl 60) (Paladin) IP Tier: 7 - Naxxramas 40
+    Athree (lvl 55) (Death Knight) IP Tier: 13 - Sunwell Plateau
+  Account 106: Characters: 3
+    Bone (lvl 60) (Hunter) IP Tier: 7 - Naxxramas 40
     ...
 ```
 
@@ -155,7 +156,7 @@ All commands begin with `.levelsync`.
 
 | Command | Description |
 |---------|-------------|
-| `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to, and remove all linked keys. If the character is not in a group, removes their account key only. |
+| `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to and remove all associated account keys. If the character is not in a group, removes their account key only. This is the only command that deletes account keys. |
 
 ---
 

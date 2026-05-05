@@ -34,6 +34,13 @@ static std::string EscLogin(std::string s)
     return s;
 }
 
+static std::string CapFirst(std::string s)
+{
+    if (!s.empty())
+        s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
+    return s;
+}
+
 static uint32 GetAccountIdByName(const std::string& name)
 {
     QueryResult r = LoginDatabase.Query(
@@ -125,6 +132,33 @@ static const char* IPTierName(uint8 tier)
     }
 }
 
+static const char* IPTierColor(uint8 tier)
+{
+    switch (tier)
+    {
+        case 0:  return "808080";
+        case 1:  return "de8c33";
+        case 2:  return "de8c33";
+        case 3:  return "d94040";
+        case 4:  return "4da64d";
+        case 5:  return "4d80d9";
+        case 6:  return "a64dd9";
+        case 7:  return "33b8b8";
+        case 8:  return "c0b840";
+        case 9:  return "cc4780";
+        case 10: return "8c8cb3";
+        case 11: return "ff8026";
+        case 12: return "38cc8c";
+        case 13: return "4d80ff";
+        case 14: return "8cc74d";
+        case 15: return "b380f2";
+        case 16: return "38bfb3";
+        case 17: return "e6334d";
+        case 18: return "59cc59";
+        default: return "808080";
+    }
+}
+
 // Displays all members of a group grouped by account, with class color, class name, and IP tier.
 static void DisplayGroupMembers(ChatHandler* handler, uint32 groupId)
 {
@@ -162,18 +196,30 @@ static void DisplayGroupMembers(ChatHandler* handler, uint32 groupId)
         }
 
         uint8 tier = sLevelSync->GetCharacterIPTierPublic(guid);
-        if (tier == 0)
-        {
-            handler->PSendSysMessage("    |cff{}{}|r (lvl {}) ({}) IP Tier: None",
-                ClassColor(cls), name, static_cast<uint32>(level), ClassName(cls));
-        }
-        else
-        {
-            handler->PSendSysMessage("    |cff{}{}|r (lvl {}) ({}) IP Tier: {} - {}",
-                ClassColor(cls), name, static_cast<uint32>(level), ClassName(cls),
-                static_cast<uint32>(tier), IPTierName(tier));
-        }
+        handler->PSendSysMessage("    |cff{}{}|r (lvl {}) (|cffffff00{}|r) IP Tier: |cff{}{} - {}|r",
+            ClassColor(cls), CapFirst(name), static_cast<uint32>(level),
+            ClassName(cls),
+            IPTierColor(tier), static_cast<uint32>(tier), IPTierName(tier));
     } while (r->NextRow());
+}
+
+static void DisplayGroupStatus(ChatHandler* handler, uint32 groupId)
+{
+    uint32 accounts  = sLevelSync->GetGroupAccountCount(groupId);
+    bool   levelSync = sLevelSync->IsGroupLevelSyncEnabled(groupId);
+    bool   progSync  = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
+
+    QueryResult countResult = CharacterDatabase.Query(
+        "SELECT COUNT(*) FROM levelsync_members WHERE group_id = {}", groupId);
+    uint64 totalChars = countResult ? countResult->Fetch()[0].Get<uint64>() : 0;
+
+    handler->PSendSysMessage("|cff00ff00[LevelSync]|r Sync Group #{}", groupId);
+    handler->PSendSysMessage("  Accounts: {}/{}", accounts, sLevelSync->GetMaxLinkedAccounts());
+    handler->PSendSysMessage("  Total Characters: {}", totalChars);
+    handler->PSendSysMessage("  Level sync: {}", levelSync ? "|cff00ff00ON|r" : "|cffff0000OFF|r");
+    handler->PSendSysMessage("  Progression sync: {}", progSync ? "|cff00ff00ON|r" : "|cffff0000OFF|r");
+    handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group members:");
+    DisplayGroupMembers(handler, groupId);
 }
 
 // Creates a new group and returns its group_id.
@@ -239,6 +285,7 @@ public:
             { "removeaccount",  HandleRemoveAccountCommand,  SEC_PLAYER,     Console::No },
             { "removechar",     HandleRemoveCharCommand,     SEC_PLAYER,     Console::No },
             { "removeall",      HandleRemoveAllCommand,      SEC_PLAYER,     Console::No },
+            { "disbandaccount", HandleDisbandAccountCommand, SEC_PLAYER,     Console::No },
             { "listaccount",    HandleListAccountCommand,    SEC_PLAYER,     Console::No },
             { "status",         HandleStatusCommand,         SEC_PLAYER,     Console::No },
             { "level",          HandleLevelCommand,          SEC_PLAYER,     Console::No },
@@ -261,7 +308,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -280,7 +327,7 @@ public:
             "ON DUPLICATE KEY UPDATE security_key = '{}'",
             accountId, hashed, hashed);
 
-        handler->PSendSysMessage("[LevelSync] Account key set.");
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account key set.");
         return true;
     }
 
@@ -291,7 +338,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -311,7 +358,7 @@ public:
         uint32 targetAccountId = GetAccountIdByName(std::string(accountArg));
         if (!targetAccountId)
         {
-            handler->PSendSysMessage("[LevelSync] Account '{}' not found.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' not found.", accountArg);
             return true;
         }
 
@@ -321,13 +368,13 @@ public:
         {
             if (!keyArg)
             {
-                handler->PSendSysMessage("[LevelSync] A key is required to link another account.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r A key is required to link another account.");
                 return true;
             }
 
             if (!VerifyAccountKey(targetAccountId, std::string(keyArg)))
             {
-                handler->PSendSysMessage("[LevelSync] Invalid key.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Invalid key.");
                 return true;
             }
 
@@ -345,7 +392,7 @@ public:
 
                 if (theirGroup != myGroup)
                 {
-                    handler->PSendSysMessage("[LevelSync] That account is already in a different sync group.");
+                    handler->PSendSysMessage("|cff00ff00[LevelSync]|r That account is already in a different sync group.");
                     return true;
                 }
             }
@@ -355,7 +402,7 @@ public:
         uint32 groupId = GetOrCreateGroup(myGuid, myAccountId);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] Failed to create sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Failed to create sync group.");
             return true;
         }
 
@@ -370,7 +417,7 @@ public:
         {
             if (sLevelSync->GetGroupAccountCount(groupId) >= sLevelSync->GetMaxLinkedAccounts())
             {
-                handler->PSendSysMessage("[LevelSync] Group is full ({}/{} accounts).",
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group is full ({}/{} accounts).",
                     sLevelSync->GetGroupAccountCount(groupId),
                     sLevelSync->GetMaxLinkedAccounts());
                 return true;
@@ -382,7 +429,7 @@ public:
 
         if (!chars)
         {
-            handler->PSendSysMessage("[LevelSync] No characters found on account '{}'.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r No characters found on account '{}'.", accountArg);
             return true;
         }
 
@@ -405,11 +452,11 @@ public:
                 "SELECT group_id FROM levelsync_members WHERE char_guid = {}", charGuid);
             if (otherGroup)
             {
-                handler->PSendSysMessage("[LevelSync] Skipped {} — already in another group.", charName);
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Skipped {} — already in another group.", charName);
                 continue;
             }
 
-            CharacterDatabase.Execute(
+            CharacterDatabase.DirectExecute(
                 "INSERT IGNORE INTO levelsync_members (group_id, char_guid, account_id) VALUES ({}, {}, {})",
                 groupId, charGuid, targetAccountId);
             ++linked;
@@ -421,20 +468,21 @@ public:
             bool ipWasOn    = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
 
             if (levelWasOn)
-                CharacterDatabase.Execute(
+                CharacterDatabase.DirectExecute(
                     "UPDATE levelsync_groups SET level_sync_enabled = 0 WHERE group_id = {}", groupId);
             if (ipWasOn)
-                CharacterDatabase.Execute(
+                CharacterDatabase.DirectExecute(
                     "UPDATE levelsync_groups SET sync_progression = 0 WHERE group_id = {}", groupId);
 
-            handler->PSendSysMessage("[LevelSync] Linked {} character(s) from account '{}'.", linked, accountArg);
+            DisplayGroupStatus(handler, groupId);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Linked {} character(s) from account '{}'.", linked, accountArg);
             if (levelWasOn)
-                handler->PSendSysMessage("[LevelSync] Level sync turned OFF — use .levelsync level on to sync.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned OFF — use .levelsync level on to sync.");
             if (ipWasOn)
-                handler->PSendSysMessage("[LevelSync] IP sync turned OFF — use .levelsync IP on to sync.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned OFF — use .levelsync IP on to sync.");
         }
         else
-            handler->PSendSysMessage("[LevelSync] No new characters were linked from account '{}'.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r No new characters were linked from account '{}'.", accountArg);
 
         return true;
     }
@@ -446,7 +494,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -469,7 +517,7 @@ public:
             "SELECT guid, account FROM characters WHERE LOWER(name) = LOWER('{}')", EscChar(charName));
         if (!charResult)
         {
-            handler->PSendSysMessage("[LevelSync] Character '{}' not found.", charName);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Character '{}' not found.", charName);
             return true;
         }
 
@@ -481,13 +529,13 @@ public:
         {
             if (!keyArg)
             {
-                handler->PSendSysMessage("[LevelSync] A key is required to link a character from another account.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r A key is required to link a character from another account.");
                 return true;
             }
 
             if (!VerifyAccountKey(targetAccountId, std::string(keyArg)))
             {
-                handler->PSendSysMessage("[LevelSync] Invalid key.");
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Invalid key.");
                 return true;
             }
         }
@@ -498,20 +546,20 @@ public:
 
         if (targetGroup && targetGroup != myGroup)
         {
-            handler->PSendSysMessage("[LevelSync] {} is already in a different sync group.", charName);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} is already in a different sync group.", charName);
             return true;
         }
 
         if (targetGroup && targetGroup == myGroup)
         {
-            handler->PSendSysMessage("[LevelSync] {} is already in your sync group.", charName);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} is already in your sync group.", charName);
             return true;
         }
 
         uint32 groupId = GetOrCreateGroup(myGuid, myAccountId);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] Failed to create sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Failed to create sync group.");
             return true;
         }
 
@@ -526,14 +574,14 @@ public:
         {
             if (sLevelSync->GetGroupAccountCount(groupId) >= sLevelSync->GetMaxLinkedAccounts())
             {
-                handler->PSendSysMessage("[LevelSync] Group is full ({}/{} accounts).",
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group is full ({}/{} accounts).",
                     sLevelSync->GetGroupAccountCount(groupId),
                     sLevelSync->GetMaxLinkedAccounts());
                 return true;
             }
         }
 
-        CharacterDatabase.Execute(
+        CharacterDatabase.DirectExecute(
             "INSERT IGNORE INTO levelsync_members (group_id, char_guid, account_id) VALUES ({}, {}, {})",
             groupId, targetGuid, targetAccountId);
 
@@ -541,17 +589,18 @@ public:
         bool ipWasOn    = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
 
         if (levelWasOn)
-            CharacterDatabase.Execute(
+            CharacterDatabase.DirectExecute(
                 "UPDATE levelsync_groups SET level_sync_enabled = 0 WHERE group_id = {}", groupId);
         if (ipWasOn)
-            CharacterDatabase.Execute(
+            CharacterDatabase.DirectExecute(
                 "UPDATE levelsync_groups SET sync_progression = 0 WHERE group_id = {}", groupId);
 
-        handler->PSendSysMessage("[LevelSync] {} added to sync group.", charName);
+        DisplayGroupStatus(handler, groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} added to sync group.", CapFirst(charName));
         if (levelWasOn)
-            handler->PSendSysMessage("[LevelSync] Level sync turned OFF — use .levelsync level on to sync.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync turned OFF — use .levelsync level on to sync.");
         if (ipWasOn)
-            handler->PSendSysMessage("[LevelSync] IP sync turned OFF — use .levelsync IP on to sync.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync turned OFF — use .levelsync IP on to sync.");
 
         return true;
     }
@@ -563,7 +612,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -580,14 +629,14 @@ public:
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
         uint32 targetAccountId = GetAccountIdByName(std::string(accountArg));
         if (!targetAccountId)
         {
-            handler->PSendSysMessage("[LevelSync] Account '{}' not found.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' not found.", accountArg);
             return true;
         }
 
@@ -600,7 +649,7 @@ public:
 
         if (!toRemove)
         {
-            handler->PSendSysMessage("[LevelSync] Account '{}' is not in your sync group.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' is not in your sync group.", accountArg);
             return true;
         }
 
@@ -612,16 +661,14 @@ public:
                     "|cff00ff00[LevelSync]|r Your character has been removed from the sync group.");
         } while (toRemove->NextRow());
 
-        CharacterDatabase.Execute(
+        CharacterDatabase.DirectExecute(
             "DELETE m FROM levelsync_members m "
             "JOIN characters c ON m.char_guid = c.guid "
             "WHERE m.group_id = {} AND c.account = {}",
             groupId, targetAccountId);
 
-        CharacterDatabase.Execute(
-            "DELETE FROM levelsync_account_keys WHERE account_id = {}", targetAccountId);
-
-        handler->PSendSysMessage("[LevelSync] Account '{}' removed from sync group.", accountArg);
+        DisplayGroupStatus(handler, groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' removed from sync group.", accountArg);
         return true;
     }
 
@@ -632,7 +679,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -649,7 +696,7 @@ public:
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
@@ -658,17 +705,16 @@ public:
             "SELECT guid, account FROM characters WHERE LOWER(name) = LOWER('{}')", EscChar(charName));
         if (!charResult)
         {
-            handler->PSendSysMessage("[LevelSync] Character '{}' not found.", charName);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Character '{}' not found.", charName);
             return true;
         }
 
-        uint32 targetGuid      = charResult->Fetch()[0].Get<uint32>();
-        uint32 targetAccountId = charResult->Fetch()[1].Get<uint32>();
+        uint32 targetGuid  = charResult->Fetch()[0].Get<uint32>();
         uint32 targetGroup = sLevelSync->GetGroupId(targetGuid);
 
         if (targetGroup != groupId)
         {
-            handler->PSendSysMessage("[LevelSync] {} is not in your sync group.", charName);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} is not in your sync group.", charName);
             return true;
         }
 
@@ -677,19 +723,11 @@ public:
             ChatHandler(member->GetSession()).PSendSysMessage(
                 "|cff00ff00[LevelSync]|r Your character has been removed from the sync group.");
 
-        CharacterDatabase.Execute(
+        CharacterDatabase.DirectExecute(
             "DELETE FROM levelsync_members WHERE char_guid = {}", targetGuid);
 
-        // Remove key if this was the account's last character in the group
-        QueryResult remaining = CharacterDatabase.Query(
-            "SELECT 1 FROM levelsync_members m JOIN characters c ON m.char_guid = c.guid "
-            "WHERE m.group_id = {} AND c.account = {} LIMIT 1",
-            groupId, targetAccountId);
-        if (!remaining)
-            CharacterDatabase.Execute(
-                "DELETE FROM levelsync_account_keys WHERE account_id = {}", targetAccountId);
-
-        handler->PSendSysMessage("[LevelSync] {} removed from sync group.", charName);
+        DisplayGroupStatus(handler, groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r {} removed from sync group.", CapFirst(charName));
         return true;
     }
 
@@ -700,20 +738,17 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
-        Player* player      = handler->GetSession()->GetPlayer();
-        uint32  myGuid      = player->GetGUID().GetCounter();
-        uint32  myAccountId = player->GetSession()->GetAccountId();
+        Player* player = handler->GetSession()->GetPlayer();
+        uint32  myGuid = player->GetGUID().GetCounter();
 
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            CharacterDatabase.Execute(
-                "DELETE FROM levelsync_account_keys WHERE account_id = {}", myAccountId);
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group. Account key removed.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
@@ -725,13 +760,6 @@ public:
                     "|cff00ff00[LevelSync]|r Your sync group has been disbanded.");
         }
 
-        // Wipe account keys for all accounts in the group
-        CharacterDatabase.DirectExecute(
-            "DELETE ak FROM levelsync_account_keys ak "
-            "JOIN levelsync_members m ON ak.account_id = m.account_id "
-            "WHERE m.group_id = {}",
-            groupId);
-
         // Wipe members then group
         CharacterDatabase.Execute(
             "DELETE FROM levelsync_members WHERE group_id = {}", groupId);
@@ -739,7 +767,59 @@ public:
         CharacterDatabase.Execute(
             "DELETE FROM levelsync_groups WHERE group_id = {}", groupId);
 
-        handler->PSendSysMessage("[LevelSync] Sync group disbanded. All keys removed.");
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Sync group disbanded.");
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // .levelsync disbandaccount
+    // -------------------------------------------------------------------
+    static bool HandleDisbandAccountCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        if (!sLevelSync->IsEnabled())
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
+            return true;
+        }
+
+        Player* player      = handler->GetSession()->GetPlayer();
+        uint32  myAccountId = player->GetSession()->GetAccountId();
+
+        QueryResult r = CharacterDatabase.Query(
+            "SELECT DISTINCT m.group_id FROM levelsync_members m "
+            "JOIN characters c ON m.char_guid = c.guid "
+            "WHERE c.account = {}",
+            myAccountId);
+
+        if (!r)
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r No sync groups found for your account.");
+            return true;
+        }
+
+        std::vector<uint32> groups;
+        do {
+            groups.push_back(r->Fetch()[0].Get<uint32>());
+        } while (r->NextRow());
+
+        for (uint32 groupId : groups)
+        {
+            for (uint32 g : sLevelSync->GetGroupMemberGuids(groupId))
+            {
+                if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
+                    ChatHandler(member->GetSession()).PSendSysMessage(
+                        "|cff00ff00[LevelSync]|r Your sync group has been disbanded.");
+            }
+
+            CharacterDatabase.Execute(
+                "DELETE FROM levelsync_members WHERE group_id = {}", groupId);
+
+            CharacterDatabase.Execute(
+                "DELETE FROM levelsync_groups WHERE group_id = {}", groupId);
+        }
+
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Disbanded {} sync group(s). Keys preserved.",
+            static_cast<uint32>(groups.size()));
         return true;
     }
 
@@ -750,22 +830,41 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
         char* accountArg = strtok(const_cast<char*>(args), " ");
+        char* keyArg     = strtok(nullptr, " ");
         if (!accountArg)
         {
-            handler->PSendSysMessage("Usage: .levelsync listaccount <account>");
+            handler->PSendSysMessage("Usage: .levelsync listaccount <account> [key]");
             return true;
         }
+
+        Player* player      = handler->GetSession()->GetPlayer();
+        uint32  myAccountId = player->GetSession()->GetAccountId();
 
         uint32 targetAccountId = GetAccountIdByName(std::string(accountArg));
         if (!targetAccountId)
         {
-            handler->PSendSysMessage("[LevelSync] Account '{}' not found.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Account '{}' not found.", accountArg);
             return true;
+        }
+
+        bool ownAccount = (targetAccountId == myAccountId);
+        if (!ownAccount)
+        {
+            if (!keyArg)
+            {
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r A key is required to view another account's characters.");
+                return true;
+            }
+            if (!VerifyAccountKey(targetAccountId, std::string(keyArg)))
+            {
+                handler->PSendSysMessage("|cff00ff00[LevelSync]|r Invalid key.");
+                return true;
+            }
         }
 
         QueryResult chars = CharacterDatabase.Query(
@@ -778,11 +877,11 @@ public:
 
         if (!chars)
         {
-            handler->PSendSysMessage("[LevelSync] No characters on account '{}'.", accountArg);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r No characters on account '{}'.", accountArg);
             return true;
         }
 
-        handler->PSendSysMessage("[LevelSync] Characters on account '{}':", accountArg);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Characters on account '{}':", accountArg);
         do
         {
             std::string name  = chars->Fetch()[0].Get<std::string>();
@@ -806,7 +905,7 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
@@ -816,26 +915,11 @@ public:
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
-        uint32 accounts   = sLevelSync->GetGroupAccountCount(groupId);
-        bool   levelSync  = sLevelSync->IsGroupLevelSyncEnabled(groupId);
-        bool   progSync   = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
-
-        QueryResult countResult = CharacterDatabase.Query(
-            "SELECT COUNT(*) FROM levelsync_members WHERE group_id = {}", groupId);
-        uint64 totalChars = countResult ? countResult->Fetch()[0].Get<uint64>() : 0;
-
-        handler->PSendSysMessage("[LevelSync] Sync Group #{}", groupId);
-        handler->PSendSysMessage("  Accounts: {}/{}", accounts, sLevelSync->GetMaxLinkedAccounts());
-        handler->PSendSysMessage("  Total Characters: {}", totalChars);
-        handler->PSendSysMessage("  Level sync: {}", levelSync ? "ON" : "OFF");
-        handler->PSendSysMessage("  Progression sync: {}", progSync ? "ON" : "OFF");
-        handler->PSendSysMessage("[LevelSync] Group members:");
-        DisplayGroupMembers(handler, groupId);
-
+        DisplayGroupStatus(handler, groupId);
         return true;
     }
 
@@ -846,13 +930,13 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
         if (!sLevelSync->IsLevelSyncAllowed())
         {
-            handler->PSendSysMessage("[LevelSync] Level sync is disabled by the server.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync is disabled by the server.");
             return true;
         }
 
@@ -871,21 +955,22 @@ public:
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
-        CharacterDatabase.Execute(
+        CharacterDatabase.DirectExecute(
             "UPDATE levelsync_groups SET level_sync_enabled = {} WHERE group_id = {}",
             enable ? 1 : 0, groupId);
 
-        handler->PSendSysMessage("[LevelSync] Level sync {}.", enable ? "enabled" : "disabled");
-
         if (enable)
         {
-            handler->PSendSysMessage("[LevelSync] Syncing group to highest level...");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group to highest level...");
             sLevelSync->SyncGroupOnLevelToggle(groupId);
         }
+
+        DisplayGroupStatus(handler, groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
 
         return true;
     }
@@ -897,13 +982,13 @@ public:
     {
         if (!sLevelSync->IsEnabled())
         {
-            handler->PSendSysMessage("[LevelSync] Module is disabled.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
 
         if (!sLevelSync->IsProgressionAllowed())
         {
-            handler->PSendSysMessage("[LevelSync] Progression sync is disabled by the server.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Progression sync is disabled by the server.");
             return true;
         }
 
@@ -922,21 +1007,22 @@ public:
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
         {
-            handler->PSendSysMessage("[LevelSync] You are not in a sync group.");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
         }
 
-        CharacterDatabase.Execute(
+        CharacterDatabase.DirectExecute(
             "UPDATE levelsync_groups SET sync_progression = {} WHERE group_id = {}",
             enable ? 1 : 0, groupId);
 
-        handler->PSendSysMessage("[LevelSync] Progression sync {}.", enable ? "enabled" : "disabled");
-
         if (enable)
         {
-            handler->PSendSysMessage("[LevelSync] Syncing group progression...");
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group progression...");
             sLevelSync->SyncIPOnToggle(groupId);
         }
+
+        DisplayGroupStatus(handler, groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Progression sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
 
         return true;
     }
@@ -960,7 +1046,7 @@ public:
 
         if (!charResult)
         {
-            handler->PSendSysMessage("[LevelSync] Character '{}' not found.", target);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Character '{}' not found.", target);
             return true;
         }
 
@@ -978,7 +1064,7 @@ public:
             // Not in a group — just nuke their key
             CharacterDatabase.Execute(
                 "DELETE FROM levelsync_account_keys WHERE account_id = {}", accountId);
-            handler->PSendSysMessage("[LevelSync] '{}' is not in a sync group. Account key removed.", target);
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r '{}' is not in a sync group. Account key removed.", target);
             return true;
         }
 
@@ -1005,7 +1091,7 @@ public:
         CharacterDatabase.Execute(
             "DELETE FROM levelsync_groups WHERE group_id = {}", groupId);
 
-        handler->PSendSysMessage("[LevelSync] Group #{} fully disbanded. All keys removed.", groupId);
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group #{} fully disbanded. All keys removed.", groupId);
         return true;
     }
 };

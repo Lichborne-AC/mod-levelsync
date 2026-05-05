@@ -659,11 +659,6 @@ public:
             "LEFT JOIN levelsync_members m ON g.group_id = m.group_id "
             "WHERE m.group_id IS NULL");
 
-        // Remove account keys with no remaining members in any group
-        CharacterDatabase.Execute(
-            "DELETE ak FROM levelsync_account_keys ak "
-            "LEFT JOIN levelsync_members m ON ak.account_id = m.account_id "
-            "WHERE m.account_id IS NULL");
     }
 };
 
