@@ -2,6 +2,8 @@
 
 #include "Player.h"
 #include "DatabaseEnv.h"
+#include <ctime>
+#include <unordered_map>
 #include <vector>
 
 #define sLevelSync LevelSyncMgr::instance()
@@ -36,7 +38,6 @@ public:
     // Level sync
     void SyncGroupOnLogin(Player* player);
     void SyncGroupOnLogout(Player* player);
-    void SyncGroupOnLevelUp(Player* player);
     void SyncGroupOnLevelToggle(uint32 groupId);
 
     // IP sync
@@ -45,6 +46,11 @@ public:
     void  SyncIPOnTierUp(Player* player, uint8 newTier);
     void  SyncIPOnToggle(uint32 groupId);
     uint8 GetCharacterIPTierPublic(uint32 guid) const { return GetCharacterIPTier(guid); }
+
+    // Toggle rate-limit. Returns true (and stamps the timer) if the toggle is
+    // allowed; returns false and writes the seconds-until-next-attempt into
+    // secondsRemaining if the group is still inside its cooldown window.
+    bool TryConsumeToggleCooldown(uint32 groupId, uint32& secondsRemaining);
 
 private:
     bool   _enabled              = true;
@@ -63,16 +69,49 @@ private:
     bool _syncing   = false;
     bool _syncingIP = false;
 
+    // Last accepted toggle time (epoch seconds) per group_id. Used by
+    // TryConsumeToggleCooldown to throttle .levelsync level/IP on/off.
+    std::unordered_map<uint32, time_t> _lastToggle;
+
+    // Login-path helper: combines the per-character group lookup and the
+    // group-level/progression-sync flag lookup into one query.
+    struct GroupLoginInfo
+    {
+        uint32 groupId                = 0;
+        bool   levelSyncEnabled       = false;
+        bool   progressionSyncEnabled = false;
+    };
+
+    bool LoadGroupLoginInfo(uint32 charGuid, GroupLoginInfo& out) const;
+
     // Level sync helpers
-    uint8 GetEffectiveHighestLevel(uint32 groupId, uint8 targetCurrentLevel) const;
+    struct GroupLevelMember
+    {
+        uint32 guid;
+        uint8  level;
+        uint8  cls;
+        uint32 xp;
+    };
+
+    std::vector<GroupLevelMember> LoadGroupLevelMembers(uint32 groupId) const;
+
     bool  IsDKPushBlocked(uint8 sourceClass, uint8 targetLevel) const;
     void  ApplyLevelToOnline(Player* target, uint8 newLevel);
     void  BatchUpdateOfflineLevel(const std::vector<uint32>& guids, uint8 newLevel, uint8 minCurrentLevel = 0);
     void  BatchUpdateOfflineXP(const std::vector<uint32>& guids, uint8 level, uint32 xp);
 
     // IP sync helpers
+    struct GroupIPMember
+    {
+        uint32 guid;
+        uint8  cls;
+        uint8  tier;
+    };
+
+    std::vector<GroupIPMember> LoadGroupIPMembers(uint32 groupId) const;
+    uint8 ComputeHighestIPTierInGroup(const std::vector<GroupIPMember>& members, uint8 targetCurrentTier) const;
+
     uint8 GetCharacterIPTier(uint32 guid) const;
-    uint8 GetEffectiveHighestIPTier(uint32 groupId, uint8 targetCurrentTier) const;
     bool  IsDKIPPushBlocked(uint8 sourceClass, uint8 targetTier) const;
     void  ApplyIPTierToOnline(Player* target, uint8 newTier);
     void  BatchUpdateOfflineIPTier(const std::vector<uint32>& guids, uint8 newTier, uint8 minTier = 0);

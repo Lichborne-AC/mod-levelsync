@@ -1,23 +1,44 @@
 # mod-levelsync
 
-An AzerothCore module that syncs characters across multiple accounts to the same level and Individual Progression tier. Provides a traditional leveling experience (1-5 man) while automatically syncing your alts to your current progress (without manual edits).  Built for private servers running large altbot setups (mod-playerbots).  
+An AzerothCore module that syncs characters across multiple accounts to the same level, XP, and Individual Progression tier. Provides a traditional leveling experience (1-5 man) while keeping your alts in lockstep with your main — without manual edits. Built for private servers running large altbot setups (mod-playerbots).
 
 ---
 
 ## Features
 
-- **Level Sync** — When members levels up, all other members are instantly brought to the same level. Works for online characters in real-time and offline characters via direct DB update. (Characters do not sync down)
-- **XP Sync** — On logout, character's current XP is written to all offline group members at the same level, keeping progress consistent.
-- **IP Sync** — Syncs Individual Progression tiers (mod-individual-progression) across the group using the same upward-only logic as level sync. (will not sync down)
-- **Multi-account groups** — Up to 10 accounts (configurable)(default 6) can be linked into a single sync group. Each account can have up to 10 characters.
-- **Upward-only** — Sync never lowers Level/IP levels. If the group highest is level 10, no one gets set below 10.
-- **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by players in the module group. Adding a new character automatically turns syncs OFF. The group manually re-enables after everyone is added. (prevents accidental edits)
-- **Auto-status response** — Every add, remove, and sync toggle command automatically prints the full group status followed by a confirmation line, so you always see the current state of the group after any change.
-- **Death Knight exception (level)** — Optional: Default OFF. When disabled (0), a DK is excluded as a sync source for characters below level 55 — prevents a fresh DK from forcing all sub-55 characters to level 55. When enabled (1), DKs participate normally and can boost sub-55 characters.
-- **Death Knight exception (IP)** — Optional: Default OFF. Same logic for IP tiers using tier 13 (Sunwell Plateau) as the threshold.
-- **GM commands** — Server admins can fully disband any sync group by character name, including clearing all associated account keys. (full reset)
-- **Secure key system** — SHA-256 hashed keys are required to link accounts, preventing unauthorized linking. Keys persist until overwritten or a GM clears them — no need to re-run setkey after removing characters from a group.
-- **Auto orphan cleanup** — On every server startup, any levelsync data referencing deleted characters is automatically pruned. Empty groups are removed silently — no manual DB maintenance required.
+- **Level Sync** — Members of a sync group are kept at the same level. Reconciliation happens at session boundaries (login, logout) and on explicit toggle. Online characters get in-memory updates with a chat notification; offline characters get DB writes via bulk transactions. Upward-only — sync never lowers a character's level.
+- **XP Sync** — Same-level XP is also propagated. When a member logs in or out, the highest XP at the group's top level is pushed to all members at that level (online + offline).
+- **IP Sync** — Individual Progression tiers (mod-individual-progression) are kept in lockstep across the group. Tier changes propagate immediately — completing a tier-advance quest (or running `.ip set`) syncs the rest of the group on the spot.
+- **Multi-account groups** — Up to 10 accounts (configurable, default 6) per sync group. Each account can have up to 10 characters.
+- **Upward-only** — Sync never lowers a character's level or tier. If the group highest is level 10 / tier 5, no one gets demoted below that.
+- **Player-controlled toggles** — Level sync and IP sync are each toggled ON/OFF by group members. Adding a new character automatically turns the relevant flag OFF (with a red `OFF` chat notice) so a low-level alt isn't suddenly boosted before the player is ready.
+- **Toggle rate-limit** — A 10-second per-group cooldown prevents toggle-spam.
+- **Death Knight exception (level)** — Optional, default OFF. When OFF (`0`), DKs are excluded as sync sources for sub-55 targets — prevents a fresh DK from forcing all sub-55 characters to level 55. When ON (`1`), DKs participate normally.
+- **Death Knight exception (IP)** — Optional, default OFF. Same logic for IP tiers using tier 13 (Sunwell Plateau) as the threshold.
+- **Secure key system** — SHA-256 hashed keys are required to link accounts. Keys persist until overwritten or a GM clears them.
+- **Auto orphan cleanup** — On every server startup, levelsync data referencing deleted characters is pruned. Empty groups are removed silently.
+
+---
+
+## Sync model — important reading
+
+mod-levelsync uses a **lazy-sync model** for level and XP, and a **per-event model** for IP tier. Knowing the difference helps you understand what the mod will and won't do mid-session.
+
+### Level / XP — lazy-sync (session boundaries)
+
+Level and XP changes during a play session do **not** automatically propagate to other group members. Sync fires only at:
+
+- **Login** — when any group member logs in, the group reconciles around the new highest level/XP.
+- **Logout** — when a member logs out, their level/XP push to everyone else.
+- **Toggle** — `.levelsync level on` / `off` forces a full resync at the moment of execution.
+
+This means: if your main grinds 5 levels during a play session, your offline alts won't see those levels until somebody logs in/out or you toggle. Drift mid-session is **expected and intended** — it avoids cascading false levels from mod-playerbots' `SyncQuestWithPlayer` mirroring.
+
+### IP tier — per-event
+
+IP tier advancement is a discrete milestone (e.g., beating Naxx 40 unlocks tier 7). When mod-individual-progression rewards a tier-up quest, mod-levelsync propagates the new tier to the entire group immediately — online and offline. No need to log out or toggle.
+
+The asymmetry is deliberate. Tier-ups are intentional progression events that the whole group should advance through together; level/XP gain is continuous and prone to cascade issues, so it's lazy by design.
 
 ---
 
@@ -65,8 +86,8 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 | `LevelSync.AllowLevelSync` | `1` | Allow players to use level sync |
 | `LevelSync.AllowProgressionSync` | `1` | Allow players to use IP sync (requires mod-individual-progression) |
 | `LevelSync.MaxLinkedAccounts` | `6` | Maximum accounts per sync group (1–10) |
-| `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (0 = excluded, 1 = participates normally) | 
-| `LevelSync.DeathKnightIPException` | `0` | Allow DKs to boost non-DK characters below IP tier 13 (0 = excluded, 1 = participates normally) |
+| `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (`0` = excluded, `1` = participates normally) |
+| `LevelSync.DeathKnightIPException` | `0` | Allow DKs to boost non-DK characters below IP tier 13 (`0` = excluded, `1` = participates normally) |
 
 ---
 
@@ -88,18 +109,18 @@ IP tier data is stored in the existing `character_queststatus_rewarded` table us
 
 ### Adding Characters
 
-Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a new member/account to the module group. **Both level sync and IP sync are turned OFF by default**. This prevents the new character from being immediately boosted before the player is ready. Enable with `.levelsync level on` and/or `.levelsync IP on` after all members have been added.
+Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a new member. **Both level sync and IP sync are auto-disabled when adding** (red `OFF` chat notice) to prevent a low-level alt from being instantly boosted. Re-enable with `.levelsync level on` and/or `.levelsync IP on` after all members are in.
 
 ### Triggers
 
 | Event | Level Sync | IP Sync |
 |-------|-----------|---------|
-| Turn Sync | Syncs the player up to the group's highest level. Syncs all online and offline members to the highest level in the group. | Same logic for IP tier. |
-| Player logs out | Pushes the logging-out player's level and XP to all other group members (online in-memory, offline via DB). Never reduces levels. | Pushes the logging-out player's IP tier to all other group members. Never reduces IP tiers. |
-| Player levels up | Immediately pushes new level to all online members. Offline members are updated in DB. | N/A (IP has no equivalent automatic event; tier changes use `OnPlayerCompleteQuest`). |
-| IP tier advances (quest reward) | N/A | `OnPlayerCompleteQuest` fires for quest IDs 66001–66018. Pushes new tier to all group members. |
-| `.levelsync level on` | Syncs all group members to the current highest level at the moment of toggle. | — |
-| `.levelsync IP on` | — | Syncs all group members to the current highest IP tier at the moment of toggle. |
+| Player logs in | Reconciles group: pulls self up to highest level/XP, pushes self's level/XP to all members below. Online + offline. | Reconciles group: pulls self up to highest tier, pushes self's tier to all members below. Online + offline. |
+| Player logs out | Pushes the player's level + XP to all group members (online in-memory, offline via bulk DB UPDATE). | Pushes the player's IP tier to all group members. Online + offline (via atomic transactional bulk write). |
+| Player levels up (mid-session) | **No automatic propagation.** Lazy-sync model — drift is reconciled at next login/logout/toggle. | N/A |
+| IP tier advances (quest reward, e.g. via `.ip set` or normal IP-progression mechanics) | N/A | **Immediately propagates** to all group members. `OnPlayerCompleteQuest` hook fires on quest 66001–66018 reward. |
+| `.levelsync level on` | Full resync: every member to highest level, with XP push at each effective ceiling (handles DK / non-DK ceilings independently). | — |
+| `.levelsync IP on` | — | Full resync: every member to highest tier. |
 
 ### Death Knight Exception
 
@@ -129,9 +150,17 @@ All commands begin with `.levelsync`.
 
 | Command | Description |
 |---------|-------------|
-| `.levelsync status` | Show your sync group summary: group ID, account count, sync states, and all members with level, class, and IP tier. |
-| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling immediately syncs all members to the current highest level. |
-| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling immediately syncs all members to the current highest IP tier. |
+| `.levelsync status` | Show your sync group summary: group ID, account count, sync states, and all members with live level, class, and IP tier. Ends with a link to the LevelsyncUI addon. |
+| `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling fires a full resync at the moment of toggle (level + XP, multi-ceiling DK rules). Subject to a 10-second cooldown per group. |
+| `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling fires a full tier resync. Same 10-second cooldown applies. |
+
+### Cooldown rejection message
+
+If you toggle too fast, you'll see:
+
+```
+[LevelSync] Must wait N second(s) before resync.
+```
 
 ### Status Output Example
 
@@ -145,12 +174,13 @@ In-game the output appears with color coding: `[LevelSync]` in green, ON in gree
   Progression sync: ON
 [LevelSync] Group members:
   Account 105: Characters: 3
-    Aone (lvl 60) (Warrior) IP Tier: 7 - Naxxramas 40
+    Aone (lvl 60) (Druid) IP Tier: 7 - Naxxramas 40
     Atwo (lvl 60) (Paladin) IP Tier: 7 - Naxxramas 40
     Athree (lvl 60) (Death Knight) IP Tier: 13 - Sunwell Plateau
   Account 106: Characters: 3
     Bone (lvl 60) (Hunter) IP Tier: 7 - Naxxramas 40
     ...
+[LevelSync] For a graphical interface use the addon: https://github.com/Lichborne-AC/LevelsyncUI
 ```
 
 ---
@@ -160,6 +190,15 @@ In-game the output appears with color coding: `[LevelSync]` in green, ON in gree
 | Command | Description |
 |---------|-------------|
 | `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to and remove all associated account keys. If the character is not in a group, removes their account key only. |
+| `.levelsync gm xp <amount>` | Grant XP to your current target (or self if no target). Uses `Player::GiveXP` so it goes through AC's normal level-up pipeline — including mod-playerbots' XP-rate multiplier when targeted at a bot. Useful for testing the XP propagation paths. |
+
+### Working with `.ip set`
+
+`.ip set` is provided by mod-individual-progression, not by mod-levelsync. It's the recommended way to manually advance a character to a specific IP tier. mod-levelsync's `OnPlayerCompleteQuest` hook fires when `.ip set` rewards the underlying progression quest, so the rest of the group syncs automatically.
+
+```
+.ip set <player> <tier>     # e.g. .ip set Aone 5
+```
 
 ---
 
@@ -193,10 +232,10 @@ Used with mod-individual-progression. Tiers are stored as hidden quest IDs in `c
 
 ## UI Addon
 
-[LevelsyncUI](https://github.com/Lichborne-AC/LevelsyncUI) — A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon.
+[LevelsyncUI](https://github.com/Lichborne-AC/LevelsyncUI) — A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon. The link is also printed at the end of every `.levelsync status` output.
 
 ---
 
 ## License
 
-GPL v2 
+GPL v2

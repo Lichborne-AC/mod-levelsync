@@ -5,10 +5,13 @@
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
+#include "QuestDef.h"
 #include "ScriptMgr.h"
 #include <openssl/sha.h>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
 using namespace Acore::ChatCommands;
 
@@ -195,11 +198,29 @@ static void DisplayGroupMembers(ChatHandler* handler, uint32 groupId)
             currentAccount = accountId;
         }
 
-        uint8 tier = sLevelSync->GetCharacterIPTierPublic(guid);
+        // Prefer the in-memory Player state when the character is online or
+        // bot-loaded. The DB row only persists on the next save tick or
+        // logout, so reading c.level / character_queststatus_rewarded
+        // directly can lag behind reality (mod-levelsync's own sync writes
+        // go through GiveLevel / RewardQuest, which update memory first).
+        uint8 displayLevel = level;
+        uint8 displayTier  = sLevelSync->GetCharacterIPTierPublic(guid);
+
+        if (Player* p = ObjectAccessor::FindPlayerByLowGUID(guid))
+        {
+            displayLevel = p->GetLevel();
+            displayTier  = 0;
+            for (uint8 i = 1; i <= LEVELSYNC_IP_MAX_TIER; ++i)
+            {
+                if (p->GetQuestStatus(LEVELSYNC_IP_QUEST_BASE + i) == QUEST_STATUS_REWARDED)
+                    displayTier = i;
+            }
+        }
+
         handler->PSendSysMessage("    |cff{}{}|r (lvl {}) (|cffffff00{}|r) IP Tier: |cff{}{} - {}|r",
-            ClassColor(cls), CapFirst(name), static_cast<uint32>(level),
+            ClassColor(cls), CapFirst(name), static_cast<uint32>(displayLevel),
             ClassName(cls),
-            IPTierColor(tier), static_cast<uint32>(tier), IPTierName(tier));
+            IPTierColor(displayTier), static_cast<uint32>(displayTier), IPTierName(displayTier));
     } while (r->NextRow());
 }
 
@@ -220,6 +241,7 @@ static void DisplayGroupStatus(ChatHandler* handler, uint32 groupId)
     handler->PSendSysMessage("  Progression sync: {}", progSync ? "|cff00ff00ON|r" : "|cffff0000OFF|r");
     handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group members:");
     DisplayGroupMembers(handler, groupId);
+    handler->PSendSysMessage("|cff00ff00[LevelSync]|r For a graphical interface use the addon: |cff3399ffhttps://github.com/Lichborne-AC/LevelsyncUI|r");
 }
 
 // Creates a new group and returns its group_id.
@@ -275,6 +297,7 @@ public:
         static ChatCommandTable gmTable =
         {
             { "removeall",  HandleGmRemoveAllCommand,  SEC_GAMEMASTER, Console::No },
+            { "xp",         HandleGmXpCommand,         SEC_GAMEMASTER, Console::No },
         };
 
         static ChatCommandTable commandTable =
@@ -927,14 +950,26 @@ public:
     // -------------------------------------------------------------------
     static bool HandleStatusCommand(ChatHandler* handler, char const* /*args*/)
     {
+        Player* player = handler->GetSession()->GetPlayer();
+        uint32  myGuid = player->GetGUID().GetCounter();
+
+        // Per-character 1.5s cooldown. Silent fail on spam (no chat output).
+        // Timer stamps only on accepted calls so a spam burst can't slide
+        // the next allowed call forward.
+        using clock = std::chrono::steady_clock;
+        static std::unordered_map<uint32, clock::time_point> lastStatus;
+        constexpr auto COOLDOWN = std::chrono::milliseconds(1500);
+        auto now = clock::now();
+        auto it = lastStatus.find(myGuid);
+        if (it != lastStatus.end() && now - it->second < COOLDOWN)
+            return true;
+        lastStatus[myGuid] = now;
+
         if (!sLevelSync->IsEnabled())
         {
             handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
             return true;
         }
-
-        Player* player = handler->GetSession()->GetPlayer();
-        uint32  myGuid = player->GetGUID().GetCounter();
 
         uint32 groupId = sLevelSync->GetGroupId(myGuid);
         if (!groupId)
@@ -981,6 +1016,19 @@ public:
         {
             handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
+        }
+
+        bool isGM = handler->GetSession() && handler->GetSession()->GetSecurity() > SEC_PLAYER;
+        if (!isGM)
+        {
+            uint32 secondsRemaining = 0;
+            if (!sLevelSync->TryConsumeToggleCooldown(groupId, secondsRemaining))
+            {
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Must wait |cffff0000{}|r second(s) before resync.",
+                    secondsRemaining);
+                return true;
+            }
         }
 
         CharacterDatabase.DirectExecute(
@@ -1033,6 +1081,19 @@ public:
         {
             handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
             return true;
+        }
+
+        bool isGM = handler->GetSession() && handler->GetSession()->GetSecurity() > SEC_PLAYER;
+        if (!isGM)
+        {
+            uint32 secondsRemaining = 0;
+            if (!sLevelSync->TryConsumeToggleCooldown(groupId, secondsRemaining))
+            {
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Must wait |cffff0000{}|r second(s) before resync.",
+                    secondsRemaining);
+                return true;
+            }
         }
 
         CharacterDatabase.DirectExecute(
@@ -1116,6 +1177,50 @@ public:
             "DELETE FROM levelsync_groups WHERE group_id = {}", groupId);
 
         handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group #{} fully disbanded. All keys removed.", groupId);
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // .levelsync gm xp <amount>
+    //
+    // Adds XP to the GM's current target (or self if no target). Uses the
+    // engine's normal Player::GiveXP path so any resulting level-up is
+    // handled correctly. Required because AC has no built-in xp modify
+    // command and direct DB writes are invisible to online characters.
+    // -------------------------------------------------------------------
+    static bool HandleGmXpCommand(ChatHandler* handler, char const* args)
+    {
+        char* arg = strtok(const_cast<char*>(args), " ");
+        if (!arg)
+        {
+            handler->PSendSysMessage("Usage: .levelsync gm xp <amount>");
+            return true;
+        }
+
+        int32 amount = atoi(arg);
+        if (amount <= 0)
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r XP amount must be a positive integer.");
+            return true;
+        }
+
+        Player* target = handler->getSelectedPlayer();
+        if (!target)
+            target = handler->GetSession()->GetPlayer();
+
+        if (!target)
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r No valid target.");
+            return true;
+        }
+
+        target->GiveXP(static_cast<uint32>(amount), nullptr);
+
+        handler->PSendSysMessage(
+            "|cff00ff00[LevelSync]|r Granted {} XP to {} (now level {}, xp {}).",
+            amount, target->GetName(),
+            static_cast<uint32>(target->GetLevel()),
+            target->GetUInt32Value(PLAYER_XP));
         return true;
     }
 };

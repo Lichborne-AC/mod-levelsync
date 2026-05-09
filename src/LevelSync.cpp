@@ -1,4 +1,5 @@
 #include "LevelSync.h"
+#include "AchievementMgr.h"
 #include "Config.h"
 #include "ObjectAccessor.h"
 #include "CharacterCache.h"
@@ -8,8 +9,8 @@
 #include "QuestDef.h"
 #include "ScriptMgr.h"
 #include "UpdateFields.h"
-#include <algorithm>
 #include <string>
+#include <unordered_map>
 
 LevelSyncMgr* LevelSyncMgr::instance()
 {
@@ -88,40 +89,103 @@ std::vector<uint32> LevelSyncMgr::GetGroupMemberGuids(uint32 groupId, uint32 exc
 }
 
 // -----------------------------------------------------------------------
+// Toggle rate-limit
+// -----------------------------------------------------------------------
+
+bool LevelSyncMgr::TryConsumeToggleCooldown(uint32 groupId, uint32& secondsRemaining)
+{
+    constexpr time_t COOLDOWN_SECONDS = 10;
+
+    time_t now = std::time(nullptr);
+    auto it = _lastToggle.find(groupId);
+    if (it != _lastToggle.end())
+    {
+        time_t elapsed = now - it->second;
+        if (elapsed >= 0 && elapsed < COOLDOWN_SECONDS)
+        {
+            secondsRemaining = static_cast<uint32>(COOLDOWN_SECONDS - elapsed);
+            return false;
+        }
+    }
+
+    _lastToggle[groupId] = now;
+    secondsRemaining = 0;
+    return true;
+}
+
+// -----------------------------------------------------------------------
+// Login-path helper
+// -----------------------------------------------------------------------
+
+bool LevelSyncMgr::LoadGroupLoginInfo(uint32 charGuid, GroupLoginInfo& out) const
+{
+    out = GroupLoginInfo{};
+
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT g.group_id, g.level_sync_enabled, g.sync_progression "
+        "FROM levelsync_members m "
+        "JOIN levelsync_groups g ON m.group_id = g.group_id "
+        "WHERE m.char_guid = {}",
+        charGuid);
+
+    if (!r)
+        return false;
+
+    Field* f = r->Fetch();
+    out.groupId                = f[0].Get<uint32>();
+    out.levelSyncEnabled       = f[1].Get<uint8>() == 1;
+    out.progressionSyncEnabled = f[2].Get<uint8>() == 1;
+    return true;
+}
+
+// -----------------------------------------------------------------------
 // Level sync helpers
 // -----------------------------------------------------------------------
 
-bool LevelSyncMgr::IsDKPushBlocked(uint8 sourceClass, uint8 targetLevel) const
+std::vector<LevelSyncMgr::GroupLevelMember> LevelSyncMgr::LoadGroupLevelMembers(uint32 groupId) const
 {
-    return !_dkException && sourceClass == LEVELSYNC_CLASS_DEATH_KNIGHT && targetLevel < LEVELSYNC_DK_MIN_LEVEL;
-}
+    std::vector<GroupLevelMember> members;
 
-uint8 LevelSyncMgr::GetEffectiveHighestLevel(uint32 groupId, uint8 targetCurrentLevel) const
-{
     QueryResult r = CharacterDatabase.Query(
-        "SELECT c.level, c.`class` "
+        "SELECT m.char_guid, c.level, c.`class`, c.xp "
         "FROM levelsync_members m "
         "JOIN characters c ON m.char_guid = c.guid "
         "WHERE m.group_id = {}",
         groupId);
 
     if (!r)
-        return targetCurrentLevel;
+        return members;
 
-    uint8 highest = targetCurrentLevel;
     do
     {
-        uint8 memberLevel = r->Fetch()[0].Get<uint8>();
-        uint8 memberClass = r->Fetch()[1].Get<uint8>();
+        GroupLevelMember gm;
+        gm.guid  = r->Fetch()[0].Get<uint32>();
+        gm.level = r->Fetch()[1].Get<uint8>();
+        gm.cls   = r->Fetch()[2].Get<uint8>();
+        gm.xp    = r->Fetch()[3].Get<uint32>();
 
-        if (!_dkException && memberClass == LEVELSYNC_CLASS_DEATH_KNIGHT && targetCurrentLevel < LEVELSYNC_DK_MIN_LEVEL)
-            continue;
+        // Overlay live in-memory state for online characters. The DB row
+        // only persists on the next save tick or logout, so reading c.level
+        // / c.xp directly can lag behind reality (e.g. a GM bumps a bot to
+        // level 10 via .character level — DB still shows the old level
+        // until next save). Sync paths that consume this snapshot need to
+        // see the truth, otherwise they compute "highest" against stale
+        // data and skip propagation.
+        if (Player* online = ObjectAccessor::FindPlayerByLowGUID(gm.guid))
+        {
+            gm.level = online->GetLevel();
+            gm.xp    = online->GetUInt32Value(PLAYER_XP);
+        }
 
-        if (memberLevel > highest)
-            highest = memberLevel;
+        members.push_back(gm);
     } while (r->NextRow());
 
-    return highest;
+    return members;
+}
+
+bool LevelSyncMgr::IsDKPushBlocked(uint8 sourceClass, uint8 targetLevel) const
+{
+    return !_dkException && sourceClass == LEVELSYNC_CLASS_DEATH_KNIGHT && targetLevel < LEVELSYNC_DK_MIN_LEVEL;
 }
 
 void LevelSyncMgr::ApplyLevelToOnline(Player* target, uint8 newLevel)
@@ -131,6 +195,10 @@ void LevelSyncMgr::ApplyLevelToOnline(Player* target, uint8 newLevel)
 
     _syncing = true;
     target->GiveLevel(newLevel);
+    // GiveLevel does not zero PLAYER_XP. Without this, the receiver retains
+    // whatever XP they had toward their previous level, which collapses to
+    // an extra ding on the very next quest turn-in.
+    target->SetUInt32Value(PLAYER_XP, 0);
     _syncing = false;
 
     ChatHandler(target->GetSession()).PSendSysMessage(
@@ -150,13 +218,44 @@ void LevelSyncMgr::BatchUpdateOfflineLevel(const std::vector<uint32>& guids, uin
         inList += std::to_string(guids[i]);
     }
 
-    CharacterDatabase.Execute(
-        "UPDATE characters SET level = {}, xp = 0 WHERE guid IN ({}) AND level < {} AND level >= {}",
-        newLevel, inList, newLevel, minCurrentLevel);
+    // Pre-filter: ask the DB which guids will actually qualify so the
+    // post-update cache and achievement-queue writes only fire for chars
+    // whose level genuinely changed. Without this, callers that pass a
+    // mixed batch (e.g. an offline DK at 55 in a level-10 push) would see
+    // their cache row drift from the DB row for non-qualifying guids and
+    // accumulate pointless achievement-queue rows that are discarded at
+    // login. Costs one extra SELECT per call; group sizes are small.
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT guid FROM characters WHERE guid IN ({}) AND level < {} AND level >= {}",
+        inList, newLevel, minCurrentLevel);
+    if (!r)
+        return;
 
-    for (uint32 g : guids)
+    std::vector<uint32> actual;
+    do { actual.push_back(r->Fetch()[0].Get<uint32>()); }
+    while (r->NextRow());
+
+    std::string actualInList;
+    for (size_t i = 0; i < actual.size(); ++i)
+    {
+        if (i > 0) actualInList += ',';
+        actualInList += std::to_string(actual[i]);
+    }
+
+    CharacterDatabase.Execute(
+        "UPDATE characters SET level = {}, xp = 0 WHERE guid IN ({})",
+        newLevel, actualInList);
+
+    for (uint32 g : actual)
+    {
         sCharacterCache->UpdateCharacterLevel(
             ObjectGuid::Create<HighGuid::Player>(g), newLevel);
+        // Mirror what cs_character.cpp's offline branch does so a char who
+        // gets pushed past a reach-level threshold while offline is credited
+        // for the achievement on next login.
+        sAchievementMgr->UpdateAchievementCriteriaForOfflinePlayer(
+            g, ACHIEVEMENT_CRITERIA_TYPE_REACH_LEVEL);
+    }
 }
 
 void LevelSyncMgr::BatchUpdateOfflineXP(const std::vector<uint32>& guids, uint8 level, uint32 xp)
@@ -185,30 +284,101 @@ void LevelSyncMgr::SyncGroupOnLogin(Player* player)
     if (!_enabled || !_allowLevelSync)
         return;
 
-    uint32 groupId = GetGroupId(player->GetGUID().GetCounter());
-    if (!groupId || !IsGroupLevelSyncEnabled(groupId))
+    uint32 myGuid = player->GetGUID().GetCounter();
+
+    GroupLoginInfo info;
+    if (!LoadGroupLoginInfo(myGuid, info))
+        return;
+    if (!info.groupId || !info.levelSyncEnabled)
         return;
 
-    uint8 highest = GetEffectiveHighestLevel(groupId, player->GetLevel());
-
-    if (highest > player->GetLevel())
-        ApplyLevelToOnline(player, highest);
+    auto members = LoadGroupLevelMembers(info.groupId);
+    if (members.empty())
+        return;
 
     uint8 myLevel = player->GetLevel();
-    uint8 myClass = player->getClass();
 
-    for (uint32 g : GetGroupMemberGuids(groupId, player->GetGUID().GetCounter()))
+    // Skip DK members when the target (logging-in player) is below the DK
+    // floor and the exception config is disabled.
+    uint8 highest = myLevel;
+    for (auto const& m : members)
     {
-        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
+        if (!_dkException && m.cls == LEVELSYNC_CLASS_DEATH_KNIGHT && myLevel < LEVELSYNC_DK_MIN_LEVEL)
+            continue;
+        if (m.level > highest)
+            highest = m.level;
+    }
+
+    if (highest > myLevel)
+    {
+        ApplyLevelToOnline(player, highest);
+        myLevel = highest;
+    }
+
+    // After any pull-up, find the highest XP at the player's current level
+    // and bump the player up to match. Online members' XP is read live;
+    // offline members' XP is read from the snapshot. Same-level only —
+    // cross-level comparison is moot because the player's at the highest
+    // level after the pull-up step.
+    uint32 myXP = player->GetUInt32Value(PLAYER_XP);
+    uint32 highestXP = myXP;
+    for (auto const& m : members)
+    {
+        if (m.guid == myGuid)
+            continue;
+        if (m.level != myLevel)
+            continue;
+        uint32 memberXP = m.xp;
+        if (Player* online = ObjectAccessor::FindPlayerByLowGUID(m.guid))
+            memberXP = online->GetUInt32Value(PLAYER_XP);
+        if (memberXP > highestXP)
+            highestXP = memberXP;
+    }
+
+    if (highestXP > myXP)
+    {
+        player->SetUInt32Value(PLAYER_XP, highestXP);
+        myXP = highestXP;
+    }
+
+    uint8 myClass = player->getClass();
+    uint8 minLevel = IsDKPushBlocked(myClass, 0) ? LEVELSYNC_DK_MIN_LEVEL : 0;
+    std::vector<uint32> offlineGuids;
+
+    for (auto const& m : members)
+    {
+        if (m.guid == myGuid)
+            continue;
+        if (IsDKPushBlocked(myClass, m.level))
+            continue;
+
+        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(m.guid))
         {
-            if (member->GetLevel() < myLevel)
+            if (m.level < myLevel)
             {
-                if (IsDKPushBlocked(myClass, member->GetLevel()))
-                    continue;
                 ApplyLevelToOnline(member, myLevel);
+                // ApplyLevelToOnline zeros the receiver's XP. Bump it up to
+                // myXP so online pulled-up members match the offline branch
+                // (BatchUpdateOfflineLevel + BatchUpdateOfflineXP would put
+                // an offline pulled-up char at myLevel/myXP). Without this
+                // bump, online and offline members would drift apart after
+                // login sync.
+                if (myXP > 0)
+                    member->SetUInt32Value(PLAYER_XP, myXP);
+            }
+            else if (m.level == myLevel && member->GetUInt32Value(PLAYER_XP) < myXP)
+            {
+                member->SetUInt32Value(PLAYER_XP, myXP);
             }
         }
+        else
+        {
+            offlineGuids.push_back(m.guid);
+        }
     }
+
+    BatchUpdateOfflineLevel(offlineGuids, myLevel, minLevel);
+    BatchUpdateOfflineXP(offlineGuids, myLevel, myXP);
 }
 
 void LevelSyncMgr::SyncGroupOnLogout(Player* player)
@@ -248,67 +418,36 @@ void LevelSyncMgr::SyncGroupOnLogout(Player* player)
     }
 }
 
-void LevelSyncMgr::SyncGroupOnLevelUp(Player* player)
-{
-    if (!_enabled || !_allowLevelSync || _syncing)
-        return;
-
-    uint32 groupId = GetGroupId(player->GetGUID().GetCounter());
-    if (!groupId || !IsGroupLevelSyncEnabled(groupId))
-        return;
-
-    uint8 newLevel = player->GetLevel();
-    uint8 myClass  = player->getClass();
-    uint8 minLevel = IsDKPushBlocked(myClass, 0) ? LEVELSYNC_DK_MIN_LEVEL : 0;
-    std::vector<uint32> offlineGuids;
-
-    for (uint32 g : GetGroupMemberGuids(groupId, player->GetGUID().GetCounter()))
-    {
-        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
-        {
-            if (IsDKPushBlocked(myClass, member->GetLevel()))
-                continue;
-            ApplyLevelToOnline(member, newLevel);
-        }
-        else
-            offlineGuids.push_back(g);
-    }
-
-    BatchUpdateOfflineLevel(offlineGuids, newLevel, minLevel);
-}
-
 void LevelSyncMgr::SyncGroupOnLevelToggle(uint32 groupId)
 {
     if (!_enabled || !_allowLevelSync)
         return;
 
-    QueryResult r = CharacterDatabase.Query(
-        "SELECT c.level, c.`class`, m.char_guid "
-        "FROM levelsync_members m "
-        "JOIN characters c ON m.char_guid = c.guid "
-        "WHERE m.group_id = {} "
-        "ORDER BY c.level DESC",
-        groupId);
-
-    if (!r)
+    auto members = LoadGroupLevelMembers(groupId);
+    if (members.empty())
         return;
 
-    struct MemberInfo { uint32 guid; uint8 level; uint8 cls; };
-    std::vector<MemberInfo> members;
-    do
+    // Precompute the two ceilings the DK rule can produce, in one pass over
+    // the in-memory member list. highestAll wins when the target sits at or
+    // above the DK floor (or the exception config is on); highestNonDK wins
+    // when a sub-floor target would otherwise be pulled up by a DK.
+    uint8 highestAll   = 0;
+    uint8 highestNonDK = 0;
+    for (auto const& m : members)
     {
-        MemberInfo mi;
-        mi.level = r->Fetch()[0].Get<uint8>();
-        mi.cls   = r->Fetch()[1].Get<uint8>();
-        mi.guid  = r->Fetch()[2].Get<uint32>();
-        members.push_back(mi);
-    } while (r->NextRow());
+        if (m.level > highestAll)
+            highestAll = m.level;
+        if (m.cls != LEVELSYNC_CLASS_DEATH_KNIGHT && m.level > highestNonDK)
+            highestNonDK = m.level;
+    }
 
     std::vector<uint32> offlineGuids;
 
-    for (auto& mi : members)
+    for (auto const& mi : members)
     {
-        uint8 target = GetEffectiveHighestLevel(groupId, mi.level);
+        uint8 target = (_dkException || mi.level >= LEVELSYNC_DK_MIN_LEVEL)
+                       ? highestAll
+                       : highestNonDK;
         if (target <= mi.level)
             continue;
 
@@ -318,17 +457,59 @@ void LevelSyncMgr::SyncGroupOnLevelToggle(uint32 groupId)
             offlineGuids.push_back(mi.guid);
     }
 
-    uint8 highest = 0;
-    for (auto& mi : members)
-    {
-        if (!_dkException && mi.cls == LEVELSYNC_CLASS_DEATH_KNIGHT)
-            continue;
-        if (mi.level > highest)
-            highest = mi.level;
-    }
+    // BatchUpdateOfflineLevel takes a single ceiling for the whole offline
+    // set; mirror the original behavior of "max of non-DK levels unless the
+    // exception is on, then max of all levels".
+    uint8 offlineHighest = _dkException ? highestAll : highestNonDK;
+    if (offlineHighest > 0)
+        BatchUpdateOfflineLevel(offlineGuids, offlineHighest);
 
-    if (highest > 0)
-        BatchUpdateOfflineLevel(offlineGuids, highest);
+    // Sync XP at each effective ceiling. With DK exception OFF, non-DKs cap
+    // at highestNonDK while DKs cap at highestAll — the two ceilings can
+    // differ (e.g. non-DKs at level 2 alongside level-55 DKs). A single XP
+    // search at highestAll would miss the non-DK tier entirely. So run the
+    // XP push at each ceiling level present in the group, deduplicating if
+    // they're equal.
+    auto syncXPAtLevel = [&](uint8 ceiling) {
+        if (ceiling == 0)
+            return;
+        uint32 topXP = 0;
+        for (auto const& m : members)
+        {
+            if (m.level != ceiling)
+                continue;
+            uint32 memberXP = m.xp;
+            if (Player* online = ObjectAccessor::FindPlayerByLowGUID(m.guid))
+                memberXP = online->GetUInt32Value(PLAYER_XP);
+            if (memberXP > topXP)
+                topXP = memberXP;
+        }
+        if (topXP == 0)
+            return;
+
+        std::vector<uint32> xpOfflineGuids;
+        for (auto const& m : members)
+        {
+            if (Player* online = ObjectAccessor::FindPlayerByLowGUID(m.guid))
+            {
+                if (online->GetLevel() == ceiling &&
+                    online->GetUInt32Value(PLAYER_XP) < topXP)
+                    online->SetUInt32Value(PLAYER_XP, topXP);
+            }
+            else
+            {
+                xpOfflineGuids.push_back(m.guid);
+            }
+        }
+        // BatchUpdateOfflineXP filters server-side by level == ceiling AND
+        // xp < topXP, so passing all offline guids is safe — only the ones
+        // actually at this ceiling with less XP will be touched.
+        BatchUpdateOfflineXP(xpOfflineGuids, ceiling, topXP);
+    };
+
+    syncXPAtLevel(highestNonDK);
+    if (highestAll != highestNonDK)
+        syncXPAtLevel(highestAll);
 }
 
 // -----------------------------------------------------------------------
@@ -338,6 +519,70 @@ void LevelSyncMgr::SyncGroupOnLevelToggle(uint32 groupId)
 bool LevelSyncMgr::IsDKIPPushBlocked(uint8 sourceClass, uint8 targetTier) const
 {
     return !_dkIPException && sourceClass == LEVELSYNC_CLASS_DEATH_KNIGHT && targetTier < LEVELSYNC_DK_IP_MIN_TIER;
+}
+
+std::vector<LevelSyncMgr::GroupIPMember> LevelSyncMgr::LoadGroupIPMembers(uint32 groupId) const
+{
+    std::vector<GroupIPMember> members;
+
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT m.char_guid, c.`class`, MAX(q.quest) "
+        "FROM levelsync_members m "
+        "JOIN characters c ON m.char_guid = c.guid "
+        "LEFT JOIN character_queststatus_rewarded q "
+        "  ON q.guid = m.char_guid "
+        "  AND q.quest BETWEEN {} AND {} "
+        "  AND q.active = 1 "
+        "WHERE m.group_id = {} "
+        "GROUP BY m.char_guid, c.`class`",
+        LEVELSYNC_IP_QUEST_BASE + 1,
+        LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER,
+        groupId);
+
+    if (!r)
+        return members;
+
+    do
+    {
+        GroupIPMember gm;
+        gm.guid = r->Fetch()[0].Get<uint32>();
+        gm.cls  = r->Fetch()[1].Get<uint8>();
+        gm.tier = r->Fetch()[2].IsNull()
+                  ? 0
+                  : uint8(r->Fetch()[2].Get<uint32>() - LEVELSYNC_IP_QUEST_BASE);
+
+        // Overlay live in-memory tier for online characters. ApplyIPTierToOnline
+        // flips quest status in memory before the DB row commits, so reading
+        // character_queststatus_rewarded directly can lag. Walk the player's
+        // rewarded-quest status for the IP range and pick the highest.
+        if (Player* online = ObjectAccessor::FindPlayerByLowGUID(gm.guid))
+        {
+            uint8 liveTier = 0;
+            for (uint8 i = 1; i <= LEVELSYNC_IP_MAX_TIER; ++i)
+            {
+                if (online->GetQuestStatus(LEVELSYNC_IP_QUEST_BASE + i) == QUEST_STATUS_REWARDED)
+                    liveTier = i;
+            }
+            gm.tier = liveTier;
+        }
+
+        members.push_back(gm);
+    } while (r->NextRow());
+
+    return members;
+}
+
+uint8 LevelSyncMgr::ComputeHighestIPTierInGroup(const std::vector<GroupIPMember>& members, uint8 targetCurrentTier) const
+{
+    uint8 highest = targetCurrentTier;
+    for (auto const& m : members)
+    {
+        if (IsDKIPPushBlocked(m.cls, targetCurrentTier))
+            continue;
+        if (m.tier > highest)
+            highest = m.tier;
+    }
+    return highest;
 }
 
 uint8 LevelSyncMgr::GetCharacterIPTier(uint32 guid) const
@@ -352,35 +597,6 @@ uint8 LevelSyncMgr::GetCharacterIPTier(uint32 guid) const
     if (!r || r->Fetch()[0].IsNull())
         return 0;
     return uint8(r->Fetch()[0].Get<uint32>() - LEVELSYNC_IP_QUEST_BASE);
-}
-
-uint8 LevelSyncMgr::GetEffectiveHighestIPTier(uint32 groupId, uint8 targetCurrentTier) const
-{
-    QueryResult r = CharacterDatabase.Query(
-        "SELECT m.char_guid, c.`class` "
-        "FROM levelsync_members m "
-        "JOIN characters c ON m.char_guid = c.guid "
-        "WHERE m.group_id = {}",
-        groupId);
-
-    if (!r)
-        return targetCurrentTier;
-
-    uint8 highest = targetCurrentTier;
-    do
-    {
-        uint32 guid       = r->Fetch()[0].Get<uint32>();
-        uint8  memberClass = r->Fetch()[1].Get<uint8>();
-        uint8  memberTier  = GetCharacterIPTier(guid);
-
-        if (IsDKIPPushBlocked(memberClass, targetCurrentTier))
-            continue;
-
-        if (memberTier > highest)
-            highest = memberTier;
-    } while (r->NextRow());
-
-    return highest;
 }
 
 void LevelSyncMgr::ApplyIPTierToOnline(Player* target, uint8 newTier)
@@ -424,20 +640,88 @@ void LevelSyncMgr::BatchUpdateOfflineIPTier(const std::vector<uint32>& guids, ui
     if (guids.empty())
         return;
 
+    // CSV of all candidate guids for the tier-lookup query.
+    std::string candidateList;
+    for (size_t i = 0; i < guids.size(); ++i)
+    {
+        if (i > 0) candidateList += ',';
+        candidateList += std::to_string(guids[i]);
+    }
+
+    // One query to find each candidate's current tier (missing rows = tier 0).
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT guid, MAX(quest) FROM character_queststatus_rewarded "
+        "WHERE guid IN ({}) AND quest BETWEEN {} AND {} AND active = 1 "
+        "GROUP BY guid",
+        candidateList,
+        LEVELSYNC_IP_QUEST_BASE + 1,
+        LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER);
+
+    std::unordered_map<uint32, uint8> currentTierByGuid;
+    if (r)
+    {
+        do
+        {
+            uint32 g = r->Fetch()[0].Get<uint32>();
+            uint8  t = r->Fetch()[1].IsNull()
+                       ? 0
+                       : uint8(r->Fetch()[1].Get<uint32>() - LEVELSYNC_IP_QUEST_BASE);
+            currentTierByGuid[g] = t;
+        } while (r->NextRow());
+    }
+
+    // Keep only guids that actually need to move up to newTier.
+    std::vector<uint32> toUpdate;
+    toUpdate.reserve(guids.size());
     for (uint32 g : guids)
     {
-        uint8 currentTier = GetCharacterIPTier(g);
-        if (currentTier >= newTier || currentTier < minTier)
+        auto it = currentTierByGuid.find(g);
+        uint8 curr = (it != currentTierByGuid.end()) ? it->second : 0;
+        if (curr >= newTier || curr < minTier)
             continue;
-
-        CharacterDatabase.Execute(
-            "DELETE FROM character_queststatus_rewarded WHERE guid = {} AND quest BETWEEN {} AND {}",
-            g, LEVELSYNC_IP_QUEST_BASE + 1, LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER);
-
-        CharacterDatabase.Execute(
-            "INSERT IGNORE INTO character_queststatus_rewarded (guid, quest, active) VALUES ({}, {}, 1)",
-            g, uint32(LEVELSYNC_IP_QUEST_BASE + newTier));
+        toUpdate.push_back(g);
     }
+
+    if (toUpdate.empty())
+        return;
+
+    // Build the IN-list and the multi-row VALUES list in one pass.
+    std::string updateList;
+    std::string valuesList;
+    uint32 newQuestId = LEVELSYNC_IP_QUEST_BASE + newTier;
+    for (size_t i = 0; i < toUpdate.size(); ++i)
+    {
+        if (i > 0)
+        {
+            updateList += ',';
+            valuesList += ',';
+        }
+        updateList += std::to_string(toUpdate[i]);
+        valuesList += '(';
+        valuesList += std::to_string(toUpdate[i]);
+        valuesList += ',';
+        valuesList += std::to_string(newQuestId);
+        valuesList += ",1)";
+    }
+
+    // Atomically clear the old IP rows and insert the new tier row for every
+    // qualifying guid. If either statement fails the whole pair rolls back,
+    // so a partial failure cannot strand a character at tier 0.
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+    trans->Append(
+        "DELETE FROM character_queststatus_rewarded "
+        "WHERE guid IN ({}) AND quest BETWEEN {} AND {}",
+        updateList,
+        LEVELSYNC_IP_QUEST_BASE + 1,
+        LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER);
+
+    trans->Append(
+        "INSERT IGNORE INTO character_queststatus_rewarded "
+        "(guid, quest, active) VALUES {}",
+        valuesList);
+
+    CharacterDatabase.CommitTransaction(trans);
 }
 
 // -----------------------------------------------------------------------
@@ -449,12 +733,29 @@ void LevelSyncMgr::SyncIPOnLogin(Player* player)
     if (!_enabled || !_allowProgressionSync)
         return;
 
-    uint32 groupId = GetGroupId(player->GetGUID().GetCounter());
-    if (!groupId || !IsGroupProgressionSyncEnabled(groupId))
+    uint32 myGuid = player->GetGUID().GetCounter();
+
+    GroupLoginInfo info;
+    if (!LoadGroupLoginInfo(myGuid, info))
+        return;
+    if (!info.groupId || !info.progressionSyncEnabled)
         return;
 
-    uint8 myTier  = GetCharacterIPTier(player->GetGUID().GetCounter());
-    uint8 highest = GetEffectiveHighestIPTier(groupId, myTier);
+    auto members = LoadGroupIPMembers(info.groupId);
+    if (members.empty())
+        return;
+
+    uint8 myTier = 0;
+    for (auto const& m : members)
+    {
+        if (m.guid == myGuid)
+        {
+            myTier = m.tier;
+            break;
+        }
+    }
+
+    uint8 highest = ComputeHighestIPTierInGroup(members, myTier);
 
     if (highest > myTier)
         ApplyIPTierToOnline(player, highest);
@@ -462,18 +763,17 @@ void LevelSyncMgr::SyncIPOnLogin(Player* player)
     uint8 effectiveTier = (highest > myTier) ? highest : myTier;
     uint8 myClass       = player->getClass();
 
-    for (uint32 g : GetGroupMemberGuids(groupId, player->GetGUID().GetCounter()))
+    for (auto const& m : members)
     {
-        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
-        {
-            uint8 memberTier = GetCharacterIPTier(member->GetGUID().GetCounter());
-            if (memberTier < effectiveTier)
-            {
-                if (IsDKIPPushBlocked(myClass, memberTier))
-                    continue;
-                ApplyIPTierToOnline(member, effectiveTier);
-            }
-        }
+        if (m.guid == myGuid)
+            continue;
+        if (m.tier >= effectiveTier)
+            continue;
+        if (IsDKIPPushBlocked(myClass, m.tier))
+            continue;
+
+        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(m.guid))
+            ApplyIPTierToOnline(member, effectiveTier);
     }
 }
 
@@ -482,30 +782,49 @@ void LevelSyncMgr::SyncIPOnLogout(Player* player)
     if (!_enabled || !_allowProgressionSync)
         return;
 
-    uint32 groupId = GetGroupId(player->GetGUID().GetCounter());
-    if (!groupId || !IsGroupProgressionSyncEnabled(groupId))
+    uint32 myGuid = player->GetGUID().GetCounter();
+
+    GroupLoginInfo info;
+    if (!LoadGroupLoginInfo(myGuid, info))
+        return;
+    if (!info.groupId || !info.progressionSyncEnabled)
         return;
 
-    uint8 myTier   = GetCharacterIPTier(player->GetGUID().GetCounter());
-    uint8 myClass  = player->getClass();
-    uint8 minTier  = IsDKIPPushBlocked(myClass, 0) ? LEVELSYNC_DK_IP_MIN_TIER : 0;
+    auto members = LoadGroupIPMembers(info.groupId);
+    if (members.empty())
+        return;
+
+    uint8 myTier = 0;
+    for (auto const& m : members)
+    {
+        if (m.guid == myGuid)
+        {
+            myTier = m.tier;
+            break;
+        }
+    }
+
+    uint8 myClass = player->getClass();
+    uint8 minTier = IsDKIPPushBlocked(myClass, 0) ? LEVELSYNC_DK_IP_MIN_TIER : 0;
 
     std::vector<uint32> offlineGuids;
 
-    for (uint32 g : GetGroupMemberGuids(groupId, player->GetGUID().GetCounter()))
+    for (auto const& m : members)
     {
-        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
+        if (m.guid == myGuid)
+            continue;
+
+        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(m.guid))
         {
-            uint8 memberTier = GetCharacterIPTier(member->GetGUID().GetCounter());
-            if (memberTier < myTier)
+            if (m.tier < myTier)
             {
-                if (IsDKIPPushBlocked(myClass, memberTier))
+                if (IsDKIPPushBlocked(myClass, m.tier))
                     continue;
                 ApplyIPTierToOnline(member, myTier);
             }
         }
         else
-            offlineGuids.push_back(g);
+            offlineGuids.push_back(m.guid);
     }
 
     BatchUpdateOfflineIPTier(offlineGuids, myTier, minTier);
@@ -516,26 +835,36 @@ void LevelSyncMgr::SyncIPOnTierUp(Player* player, uint8 newTier)
     if (!_enabled || !_allowProgressionSync || _syncingIP)
         return;
 
-    uint32 groupId = GetGroupId(player->GetGUID().GetCounter());
-    if (!groupId || !IsGroupProgressionSyncEnabled(groupId))
+    uint32 myGuid = player->GetGUID().GetCounter();
+
+    GroupLoginInfo info;
+    if (!LoadGroupLoginInfo(myGuid, info))
+        return;
+    if (!info.groupId || !info.progressionSyncEnabled)
         return;
 
-    uint8 myClass  = player->getClass();
-    uint8 minTier  = IsDKIPPushBlocked(myClass, 0) ? LEVELSYNC_DK_IP_MIN_TIER : 0;
+    auto members = LoadGroupIPMembers(info.groupId);
+    if (members.empty())
+        return;
+
+    uint8 myClass = player->getClass();
+    uint8 minTier = IsDKIPPushBlocked(myClass, 0) ? LEVELSYNC_DK_IP_MIN_TIER : 0;
     std::vector<uint32> offlineGuids;
 
-    for (uint32 g : GetGroupMemberGuids(groupId, player->GetGUID().GetCounter()))
+    for (auto const& m : members)
     {
-        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(g))
+        if (m.guid == myGuid)
+            continue;
+
+        if (Player* member = ObjectAccessor::FindPlayerByLowGUID(m.guid))
         {
-            uint8 memberTier = GetCharacterIPTier(member->GetGUID().GetCounter());
-            if (IsDKIPPushBlocked(myClass, memberTier))
+            if (IsDKIPPushBlocked(myClass, m.tier))
                 continue;
-            if (memberTier < newTier)
+            if (m.tier < newTier)
                 ApplyIPTierToOnline(member, newTier);
         }
         else
-            offlineGuids.push_back(g);
+            offlineGuids.push_back(m.guid);
     }
 
     BatchUpdateOfflineIPTier(offlineGuids, newTier, minTier);
@@ -546,33 +875,16 @@ void LevelSyncMgr::SyncIPOnToggle(uint32 groupId)
     if (!_enabled || !_allowProgressionSync)
         return;
 
-    QueryResult r = CharacterDatabase.Query(
-        "SELECT m.char_guid, c.`class` "
-        "FROM levelsync_members m "
-        "JOIN characters c ON m.char_guid = c.guid "
-        "WHERE m.group_id = {}",
-        groupId);
-
-    if (!r)
+    auto members = LoadGroupIPMembers(groupId);
+    if (members.empty())
         return;
-
-    struct MemberInfo { uint32 guid; uint8 cls; };
-    std::vector<MemberInfo> members;
-    do
-    {
-        MemberInfo mi;
-        mi.guid = r->Fetch()[0].Get<uint32>();
-        mi.cls  = r->Fetch()[1].Get<uint8>();
-        members.push_back(mi);
-    } while (r->NextRow());
 
     std::vector<uint32> offlineGuids;
 
-    for (auto& mi : members)
+    for (auto const& mi : members)
     {
-        uint8 currentTier = GetCharacterIPTier(mi.guid);
-        uint8 target      = GetEffectiveHighestIPTier(groupId, currentTier);
-        if (target <= currentTier)
+        uint8 target = ComputeHighestIPTierInGroup(members, mi.tier);
+        if (target <= mi.tier)
             continue;
 
         if (Player* p = ObjectAccessor::FindPlayerByLowGUID(mi.guid))
@@ -582,13 +894,12 @@ void LevelSyncMgr::SyncIPOnToggle(uint32 groupId)
     }
 
     uint8 highest = 0;
-    for (auto& mi : members)
+    for (auto const& mi : members)
     {
         if (!_dkIPException && mi.cls == LEVELSYNC_CLASS_DEATH_KNIGHT)
             continue;
-        uint8 tier = GetCharacterIPTier(mi.guid);
-        if (tier > highest)
-            highest = tier;
+        if (mi.tier > highest)
+            highest = mi.tier;
     }
 
     if (highest > 0)
@@ -604,15 +915,26 @@ class LevelSyncPlayerScript : public PlayerScript
 public:
     LevelSyncPlayerScript() : PlayerScript("LevelSyncPlayerScript") {}
 
+    // Sync triggers:
+    //   - login / logout: full level + IP sync (lazy-sync model)
+    //   - toggle command: forced full resync (.levelsync level on, .levelsync IP on)
+    //   - tier-up via IP-progression quest reward: per-event IP sync only
+    //
+    // Per-event LEVEL sync is intentionally NOT hooked. Bot-driven XP gain
+    // (e.g. mod-playerbots' SyncQuestWithPlayer mirroring) would cascade
+    // levels back to the master and grant unearned dings. Level drift is
+    // reconciled at session boundaries.
+    //
+    // Per-event IP TIER sync IS hooked. Tier-ups are discrete milestone
+    // events triggered by mod-individual-progression's scripted logic when
+    // a tier's content is completed; bots don't normally acquire IP-tier
+    // quests through quest-mirroring, so the cascade concern is much weaker.
+    // Real-time tier propagation matches user expectations for what's a
+    // celebrated group milestone.
     void OnPlayerLogin(Player* player) override
     {
         sLevelSync->SyncGroupOnLogin(player);
         sLevelSync->SyncIPOnLogin(player);
-    }
-
-    void OnPlayerLevelChanged(Player* player, uint8 /*oldLevel*/) override
-    {
-        sLevelSync->SyncGroupOnLevelUp(player);
     }
 
     void OnPlayerLogout(Player* player) override
