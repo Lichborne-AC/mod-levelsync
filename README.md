@@ -24,9 +24,9 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 
 ## Sync model — important reading
 
-mod-levelsync uses a **lazy-sync model** for level and XP, and a **per-event model** for IP tier. Knowing the difference helps you understand what the mod will and won't do mid-session.
+mod-levelsync uses **triggers** for level and XP, and a **per-event model** for IP tier. Knowing the difference helps you understand what the mod will and won't do mid-session.
 
-### Level / XP — lazy-sync (session boundaries)
+### Level / XP 
 
 Level and XP changes during a play session do **not** automatically propagate to other group members. Sync fires only at:
 
@@ -39,8 +39,6 @@ This means: if your main grinds 5 levels during a play session, your offline alt
 ### IP tier — per-event
 
 IP tier advancement is a discrete milestone (e.g., beating Naxx 40 unlocks tier 7). When mod-individual-progression rewards a tier-up quest, mod-levelsync propagates the new tier to the entire group immediately — online and offline. No need to log out or toggle.
-
-The asymmetry is deliberate. Tier-ups are intentional progression events that the whole group should advance through together; level/XP gain is continuous and prone to cascade issues, so it's lazy by design.
 
 ---
 
@@ -121,7 +119,7 @@ Use `.levelsync addaccount <account>` or `.levelsync addchar <name>` to add a ne
 |-------|-----------|---------|
 | Player logs in | Reconciles group: pulls self up to highest level/XP, pushes self's level/XP to all members below. Online + offline. | Reconciles group: pulls self up to highest tier, pushes self's tier to all members below. Online + offline. |
 | Player logs out | Pushes the player's level + XP to all group members (online in-memory, offline via bulk DB UPDATE). | Pushes the player's IP tier to all group members. Online + offline (via atomic transactional bulk write). |
-| Player levels up (mid-session) | **No automatic propagation.** Lazy-sync model — drift is reconciled at next login/logout/toggle. | N/A |
+| Player levels up (mid-session) | **No automatic propagation** — drift is reconciled at next login/logout/toggle. | N/A |
 | IP tier advances (quest reward, e.g. via `.ip set` or normal IP-progression mechanics) | N/A | **Immediately propagates** to all group members. `OnPlayerCompleteQuest` hook fires on quest 66001–66018 reward. |
 | `.levelsync level on` | Full resync: every member to highest level, with XP push at each effective ceiling (handles DK / non-DK ceilings independently). | — |
 | `.levelsync IP on` | — | Full resync: every member to highest tier. |
