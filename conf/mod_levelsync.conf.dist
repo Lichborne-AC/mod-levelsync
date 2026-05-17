@@ -16,6 +16,35 @@ LevelSync.AllowLevelSync = 1
 # Default: 1 (enabled)
 LevelSync.AllowProgressionSync = 1
 
+# Allow players to use the .levelsync money command, which pools every
+# other sync-group member's gold into the caller's wallet in a single
+# one-shot operation. Subject to the same 10-second per-group cooldown
+# as the level/IP toggles.
+# Default: 1 (enabled)
+LevelSync.AllowMoneyCommands = 1
+
+# Allow players to use the .levelsync unbindall [name] command, which
+# is a non-GM equivalent of the core .instance unbind all command. It
+# wipes every bound instance the target has across all 4 difficulty
+# slots (dungeons + raids), preserving the binding for the map the
+# target is currently inside.
+#
+# Target resolution:
+#   - No arg → clicked/tab-selected player, falls back to self (same
+#     semantics as the stock GM command).
+#   - Name arg → online player matching that name (case-insensitive).
+#     Refused if the named player is offline.
+#
+# This was added for personal/private servers where the operator wants
+# to give all players the convenience of clearing their own raid lockouts
+# without GM intervention. Not recommended for public servers with mixed
+# players, since stock WoW design assumes raid lockouts persist until
+# the weekly reset, and any non-GM player could clear any online
+# player's lockouts server-wide just by typing their name.
+# Default: 0 (disabled — command refuses with a "disabled by server" message)
+#          1 (enabled — anyone can use .levelsync unbindall)
+LevelSync.AllowRaidUnbind = 0
+
 # Maximum number of accounts allowed per sync group (1-10).
 # Default: 6
 LevelSync.MaxLinkedAccounts = 6

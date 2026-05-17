@@ -24,6 +24,8 @@ public:
     bool     IsEnabled()              const { return _enabled; }
     bool     IsLevelSyncAllowed()     const { return _allowLevelSync; }
     bool     IsProgressionAllowed()   const { return _allowProgressionSync; }
+    bool     IsMoneyCommandsAllowed() const { return _allowMoneyCommands; }
+    bool     IsRaidUnbindAllowed()    const { return _allowRaidUnbind; }
     bool     IsDKExceptionEnabled()   const { return _dkException; }
     bool     IsDKIPExceptionEnabled() const { return _dkIPException; }
     uint32   GetMaxLinkedAccounts()   const { return _maxLinkedAccounts; }
@@ -52,10 +54,35 @@ public:
     // secondsRemaining if the group is still inside its cooldown window.
     bool TryConsumeToggleCooldown(uint32 groupId, uint32& secondsRemaining);
 
+    // Gold pool. Drains every group member except the caller and credits the
+    // total to the caller's wallet in one shot. Online members get an
+    // in-memory SetMoney(0) + chat notice; offline members get a direct DB
+    // UPDATE. Caller's pre-pool money is untouched and not counted toward
+    // the cap check (the caller can't drain themselves).
+    enum class PoolStatus : uint8
+    {
+        Ok,
+        AloneInGroup,   // group has only the caller
+        NoGold,         // total drainable is 0
+        CapExceeded,    // caller's wallet + total would exceed MAX_MONEY_AMOUNT
+    };
+
+    struct PoolResult
+    {
+        PoolStatus status        = PoolStatus::Ok;
+        uint64     totalDrained  = 0;
+        uint32     contributors  = 0;
+        uint32     projectedSum  = 0; // for CapExceeded message (caller + total, capped at uint32)
+    };
+
+    PoolResult PoolGroupMoney(Player* caller, uint32 groupId);
+
 private:
     bool   _enabled              = true;
     bool   _allowLevelSync       = true;
     bool   _allowProgressionSync = false;
+    bool   _allowMoneyCommands   = true;
+    bool   _allowRaidUnbind      = false;
     bool   _dkException          = false;
     bool   _dkIPException        = false;
     uint32 _maxLinkedAccounts    = 6;

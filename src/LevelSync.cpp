@@ -1,6 +1,7 @@
 #include "LevelSync.h"
 #include "AchievementMgr.h"
 #include "Config.h"
+#include "Log.h"
 #include "ObjectAccessor.h"
 #include "CharacterCache.h"
 #include "Chat.h"
@@ -11,6 +12,27 @@
 #include "UpdateFields.h"
 #include <string>
 #include <unordered_map>
+
+static std::string FormatMoneyString(uint32 copper)
+{
+    uint32 g = copper / 10000;
+    uint32 s = (copper % 10000) / 100;
+    uint32 c = copper % 100;
+    std::string out;
+    if (g > 0)
+        out += std::to_string(g) + "g";
+    if (s > 0)
+    {
+        if (!out.empty()) out += " ";
+        out += std::to_string(s) + "s";
+    }
+    if (c > 0 || out.empty())
+    {
+        if (!out.empty()) out += " ";
+        out += std::to_string(c) + "c";
+    }
+    return out;
+}
 
 LevelSyncMgr* LevelSyncMgr::instance()
 {
@@ -23,6 +45,8 @@ void LevelSyncMgr::LoadConfig()
     _enabled              = sConfigMgr->GetOption<bool>("LevelSync.Enable",               true);
     _allowLevelSync       = sConfigMgr->GetOption<bool>("LevelSync.AllowLevelSync",       true);
     _allowProgressionSync = sConfigMgr->GetOption<bool>("LevelSync.AllowProgressionSync", false);
+    _allowMoneyCommands   = sConfigMgr->GetOption<bool>("LevelSync.AllowMoneyCommands",  true);
+    _allowRaidUnbind      = sConfigMgr->GetOption<bool>("LevelSync.AllowRaidUnbind",     false);
     _dkException          = sConfigMgr->GetOption<bool>("LevelSync.DeathKnightException",   false);
     _dkIPException        = sConfigMgr->GetOption<bool>("LevelSync.DeathKnightIPException", false);
     _maxLinkedAccounts    = sConfigMgr->GetOption<uint32>("LevelSync.MaxLinkedAccounts",  6);
@@ -904,6 +928,185 @@ void LevelSyncMgr::SyncIPOnToggle(uint32 groupId)
 
     if (highest > 0)
         BatchUpdateOfflineIPTier(offlineGuids, highest);
+}
+
+// -----------------------------------------------------------------------
+// Gold pool
+// -----------------------------------------------------------------------
+
+LevelSyncMgr::PoolResult LevelSyncMgr::PoolGroupMoney(Player* caller, uint32 groupId)
+{
+    PoolResult out;
+
+    uint32 callerGuid = caller->GetGUID().GetCounter();
+
+    // Snapshot every other member's money. For online members, overlay the
+    // live in-memory value because the DB `money` column only persists on
+    // the next player save and can lag behind reality (e.g. the member just
+    // sold to a vendor seconds ago). Stale DB values would short-change the
+    // cap check and the credit math.
+    QueryResult q = CharacterDatabase.Query(
+        "SELECT m.char_guid, c.money "
+        "FROM levelsync_members m "
+        "JOIN characters c ON m.char_guid = c.guid "
+        "WHERE m.group_id = {} AND m.char_guid != {}",
+        groupId, callerGuid);
+
+    if (!q)
+    {
+        out.status = PoolStatus::AloneInGroup;
+        return out;
+    }
+
+    struct MoneyMember { uint32 guid; uint32 money; };
+    std::vector<MoneyMember> members;
+    do
+    {
+        MoneyMember mm;
+        mm.guid  = q->Fetch()[0].Get<uint32>();
+        mm.money = q->Fetch()[1].Get<uint32>();
+        if (Player* online = ObjectAccessor::FindPlayerByLowGUID(mm.guid))
+            mm.money = online->GetMoney();
+        members.push_back(mm);
+    } while (q->NextRow());
+
+    uint64 snapshotTotal = 0;
+    for (auto const& m : members)
+        snapshotTotal += m.money;
+
+    if (snapshotTotal == 0)
+    {
+        out.status = PoolStatus::NoGold;
+        return out;
+    }
+
+    // Cap check up front. If caller's wallet + the snapshot total would
+    // exceed MAX_MONEY_AMOUNT, refuse cleanly before touching anyone's
+    // gold. Use uint64 arithmetic so the addition can't silently wrap.
+    uint64 callerMoney = caller->GetMoney();
+    uint64 projected   = callerMoney + snapshotTotal;
+    if (projected > uint64(MAX_MONEY_AMOUNT))
+    {
+        out.status       = PoolStatus::CapExceeded;
+        out.totalDrained = snapshotTotal;
+        out.projectedSum = projected > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32(projected);
+        return out;
+    }
+
+    // Drain online members first via SetMoney(0). PLAYER_FIELD_COINAGE is a
+    // dirty-flagged UpdateField, so the client wallet refreshes within a
+    // tick — same path vendors and mail use. Re-read GetMoney() inside the
+    // loop in case the live value shifted between snapshot and drain.
+    uint64 actualDrained = 0;
+    std::vector<uint32> offlineGuids;
+    offlineGuids.reserve(members.size());
+
+    for (auto const& m : members)
+    {
+        Player* p = ObjectAccessor::FindPlayerByLowGUID(m.guid);
+        if (!p)
+        {
+            offlineGuids.push_back(m.guid);
+            continue;
+        }
+
+        uint32 amt = p->GetMoney();
+        if (amt == 0)
+            continue;
+
+        p->SetMoney(0);
+        actualDrained += amt;
+        ++out.contributors;
+
+        ChatHandler(p->GetSession()).PSendSysMessage(
+            "|cff00ff00[LevelSync]|r Your wallet was pooled to |cffffff00{}|r "
+            "(|cffffd700{}|r).",
+            caller->GetName(),
+            FormatMoneyString(amt));
+    }
+
+    // Drain offline members. Read-then-zero is two queries rather than a
+    // single SELECT FOR UPDATE in a transaction because AC's connection
+    // pool doesn't guarantee adjacent queries hit the same connection;
+    // FOR UPDATE locks would only help if everything stayed on one. The
+    // narrow race (a member logging in between the SELECT and the UPDATE)
+    // is bounded by the world thread serialising both calls below this
+    // point: ObjectAccessor stays consistent until this function returns.
+    if (!offlineGuids.empty())
+    {
+        std::string inList;
+        for (size_t i = 0; i < offlineGuids.size(); ++i)
+        {
+            if (i > 0) inList += ',';
+            inList += std::to_string(offlineGuids[i]);
+        }
+
+        QueryResult offQ = CharacterDatabase.Query(
+            "SELECT guid, money FROM characters WHERE guid IN ({}) AND money > 0",
+            inList);
+
+        if (offQ)
+        {
+            std::vector<uint32> toZero;
+            do
+            {
+                uint32 g = offQ->Fetch()[0].Get<uint32>();
+                uint32 amt = offQ->Fetch()[1].Get<uint32>();
+                toZero.push_back(g);
+                actualDrained += amt;
+                ++out.contributors;
+            } while (offQ->NextRow());
+
+            if (!toZero.empty())
+            {
+                std::string zList;
+                for (size_t i = 0; i < toZero.size(); ++i)
+                {
+                    if (i > 0) zList += ',';
+                    zList += std::to_string(toZero[i]);
+                }
+                CharacterDatabase.Execute(
+                    "UPDATE characters SET money = 0 WHERE guid IN ({})", zList);
+            }
+        }
+    }
+
+    // Credit caller. ModifyMoney has its own internal cap; the up-front
+    // check makes overflow here practically impossible, but if the caller
+    // somehow gained money mid-command (between snapshot and credit), fall
+    // back to filling them to the cap and noting the orphaned amount in
+    // the worldserver log so a GM can compensate by hand.
+    if (actualDrained > 0)
+    {
+        uint64 nowMoney = caller->GetMoney();
+        if (nowMoney + actualDrained > uint64(MAX_MONEY_AMOUNT))
+        {
+            uint32 canTake = (nowMoney >= uint64(MAX_MONEY_AMOUNT))
+                ? 0u
+                : uint32(uint64(MAX_MONEY_AMOUNT) - nowMoney);
+            if (canTake > 0)
+                caller->ModifyMoney(int32(canTake));
+            LOG_ERROR("module",
+                "[LevelSync] Money pool by GUID {} (group {}) drained {} copper "
+                "but caller wallet only accepted {} — {} copper orphaned, "
+                "GM compensation may be needed.",
+                callerGuid, groupId, actualDrained, canTake,
+                actualDrained - canTake);
+        }
+        else
+        {
+            caller->ModifyMoney(int32(actualDrained));
+        }
+    }
+
+    LOG_INFO("module",
+        "[LevelSync] Money pool: group {} caller GUID {} drained {} copper "
+        "from {} contributor(s).",
+        groupId, callerGuid, actualDrained, out.contributors);
+
+    out.status       = PoolStatus::Ok;
+    out.totalDrained = actualDrained;
+    return out;
 }
 
 // -----------------------------------------------------------------------

@@ -2,6 +2,8 @@
 #include "Chat.h"
 #include "ChatCommand.h"
 #include "CharacterCache.h"
+#include "DBCEnums.h"
+#include "InstanceSaveMgr.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
@@ -42,6 +44,55 @@ static std::string CapFirst(std::string s)
     if (!s.empty())
         s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
     return s;
+}
+
+// Wipes every bound instance the target has across all 4 difficulty slots
+// (dungeons + raids), preserving the binding for the map the target is
+// currently inside. Returns the number of bindings cleared. Used by both
+// the player-facing `.levelsync unbindall` and the GM `.levelsync gm
+// unbindall` commands.
+static uint32 UnbindAllInstancesOn(Player* target)
+{
+    uint32 counter = 0;
+    for (uint8 i = 0; i < MAX_DIFFICULTY; ++i)
+    {
+        BoundInstancesMap const& binds = sInstanceSaveMgr->PlayerGetBoundInstances(target->GetGUID(), Difficulty(i));
+        for (BoundInstancesMap::const_iterator itr = binds.begin(); itr != binds.end();)
+        {
+            if (itr->first != target->GetMapId())
+            {
+                sInstanceSaveMgr->PlayerUnbindInstance(target->GetGUID(), itr->first, Difficulty(i), true, target);
+                // PlayerUnbindInstance mutates the map being iterated;
+                // restart the inner loop from the beginning.
+                itr = binds.begin();
+                ++counter;
+            }
+            else
+                ++itr;
+        }
+    }
+    return counter;
+}
+
+static std::string FormatMoneyDisplay(uint32 copper)
+{
+    uint32 g = copper / 10000;
+    uint32 s = (copper % 10000) / 100;
+    uint32 c = copper % 100;
+    std::string out;
+    if (g > 0)
+        out += std::to_string(g) + "g";
+    if (s > 0)
+    {
+        if (!out.empty()) out += " ";
+        out += std::to_string(s) + "s";
+    }
+    if (c > 0 || out.empty())
+    {
+        if (!out.empty()) out += " ";
+        out += std::to_string(c) + "c";
+    }
+    return out;
 }
 
 static uint32 GetAccountIdByName(const std::string& name)
@@ -298,6 +349,7 @@ public:
         {
             { "removeall",  HandleGmRemoveAllCommand,  SEC_GAMEMASTER, Console::No },
             { "xp",         HandleGmXpCommand,         SEC_GAMEMASTER, Console::No },
+            { "unbindall",  HandleGmUnbindAllCommand,  SEC_GAMEMASTER, Console::No },
         };
 
         static ChatCommandTable commandTable =
@@ -313,6 +365,8 @@ public:
             { "status",         HandleStatusCommand,         SEC_PLAYER,     Console::No },
             { "level",          HandleLevelCommand,          SEC_PLAYER,     Console::No },
             { "IP",               HandleIndivProgressionCommand, SEC_PLAYER, Console::No },
+            { "money",          HandleMoneyCommand,          SEC_PLAYER,     Console::No },
+            { "unbindall",      HandleUnbindAllCommand,      SEC_PLAYER,     Console::No },
             { "gm",             gmTable },
         };
 
@@ -1109,6 +1163,207 @@ public:
         DisplayGroupStatus(handler, groupId);
         handler->PSendSysMessage("|cff00ff00[LevelSync]|r Progression sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
 
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // .levelsync money
+    //
+    // Pools every other group member's gold (online + offline) into the
+    // caller's wallet. One-shot — no toggle, no persistent state. Shares
+    // the 10-second per-group toggle cooldown so it can't be spammed.
+    // Online drains use Player::SetMoney(0) so PLAYER_FIELD_COINAGE marks
+    // dirty and the client wallet refreshes within a tick; offline drains
+    // are a direct UPDATE on characters.money. Caller's pre-pool money is
+    // untouched and the credit goes through Player::ModifyMoney.
+    // -------------------------------------------------------------------
+    static bool HandleMoneyCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        if (!sLevelSync->IsEnabled())
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
+            return true;
+        }
+
+        if (!sLevelSync->IsMoneyCommandsAllowed())
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Money commands are disabled by the server.");
+            return true;
+        }
+
+        Player* player = handler->GetSession()->GetPlayer();
+        uint32  myGuid = player->GetGUID().GetCounter();
+
+        uint32 groupId = sLevelSync->GetGroupId(myGuid);
+        if (!groupId)
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r You are not in a sync group.");
+            return true;
+        }
+
+        bool isGM = handler->GetSession() && handler->GetSession()->GetSecurity() > SEC_PLAYER;
+        if (!isGM)
+        {
+            uint32 secondsRemaining = 0;
+            if (!sLevelSync->TryConsumeToggleCooldown(groupId, secondsRemaining))
+            {
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Must wait |cffff0000{}|r second(s) before resync.",
+                    secondsRemaining);
+                return true;
+            }
+        }
+
+        auto result = sLevelSync->PoolGroupMoney(player, groupId);
+
+        switch (result.status)
+        {
+            case LevelSyncMgr::PoolStatus::AloneInGroup:
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r No other members in your sync group.");
+                return true;
+
+            case LevelSyncMgr::PoolStatus::NoGold:
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Group has no gold to pool.");
+                return true;
+
+            case LevelSyncMgr::PoolStatus::CapExceeded:
+            {
+                std::string total = FormatMoneyDisplay(
+                    result.totalDrained > 0xFFFFFFFFull
+                        ? 0xFFFFFFFFu
+                        : uint32(result.totalDrained));
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Total |cffffd700{}|r would exceed "
+                    "the gold cap. Withdraw manually first.",
+                    total);
+                return true;
+            }
+
+            case LevelSyncMgr::PoolStatus::Ok:
+            {
+                std::string total = FormatMoneyDisplay(
+                    result.totalDrained > 0xFFFFFFFFull
+                        ? 0xFFFFFFFFu
+                        : uint32(result.totalDrained));
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r Pooled |cffffd700{}|r from {} member(s) "
+                    "into your wallet.",
+                    total, result.contributors);
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // .levelsync unbindall [name]
+    //
+    // Non-GM equivalent of the core `.instance unbind all` command. Wipes
+    // every bound instance across all 4 difficulty slots (dungeons +
+    // raids), preserving the binding for the map the target is currently
+    // inside.
+    //
+    // Target resolution (overloaded):
+    //   - No arg → clicked/tab-selected player, falls back to self.
+    //   - Name arg → online player matching that name (case-insensitive).
+    //                Refused if the named player is offline / not found.
+    //
+    // Gated by LevelSync.AllowRaidUnbind (default 0). No cooldown.
+    // -------------------------------------------------------------------
+    static bool HandleUnbindAllCommand(ChatHandler* handler, char const* args)
+    {
+        if (!sLevelSync->IsEnabled())
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Module is disabled.");
+            return true;
+        }
+
+        if (!sLevelSync->IsRaidUnbindAllowed())
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Unbind is disabled by the server.");
+            return true;
+        }
+
+        Player* target = nullptr;
+        char* nameArg  = strtok(const_cast<char*>(args), " ");
+
+        if (nameArg && *nameArg)
+        {
+            // Name lookup is case-insensitive; FindPlayerByName does the
+            // normalisation internally and returns nullptr if the player
+            // is offline or doesn't exist.
+            target = ObjectAccessor::FindPlayerByName(std::string(nameArg));
+            if (!target)
+            {
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r '{}' not found or offline.", nameArg);
+                return true;
+            }
+        }
+        else
+        {
+            target = handler->getSelectedPlayer();
+            if (!target)
+                target = handler->GetSession()->GetPlayer();
+        }
+
+        if (!target)
+            return true;
+
+        uint32 counter = UnbindAllInstancesOn(target);
+
+        if (target == handler->GetSession()->GetPlayer())
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Unbound |cffffff00{}|r instance(s).", counter);
+        else
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Unbound |cffffff00{}|r instance(s) on {}.",
+                counter, target->GetName());
+        return true;
+    }
+
+    // -------------------------------------------------------------------
+    // .levelsync gm unbindall [name]
+    //
+    // GM-gated counterpart to .levelsync unbindall. Same overloaded
+    // target resolution: clicked/tab-selected player with self fallback
+    // if no arg, or online named player (case-insensitive) if given.
+    // Always available to GMs regardless of LevelSync.AllowRaidUnbind —
+    // the conf flag only controls the SEC_PLAYER form.
+    // -------------------------------------------------------------------
+    static bool HandleGmUnbindAllCommand(ChatHandler* handler, char const* args)
+    {
+        Player* target = nullptr;
+        char* nameArg  = strtok(const_cast<char*>(args), " ");
+
+        if (nameArg && *nameArg)
+        {
+            target = ObjectAccessor::FindPlayerByName(std::string(nameArg));
+            if (!target)
+            {
+                handler->PSendSysMessage(
+                    "|cff00ff00[LevelSync]|r '{}' not found or offline.", nameArg);
+                return true;
+            }
+        }
+        else
+        {
+            target = handler->getSelectedPlayer();
+            if (!target)
+                target = handler->GetSession()->GetPlayer();
+        }
+
+        if (!target)
+            return true;
+
+        uint32 counter = UnbindAllInstancesOn(target);
+
+        if (target == handler->GetSession()->GetPlayer())
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Unbound |cffffff00{}|r instance(s).", counter);
+        else
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Unbound |cffffff00{}|r instance(s) on {}.",
+                counter, target->GetName());
         return true;
     }
 

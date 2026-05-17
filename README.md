@@ -17,6 +17,8 @@ An AzerothCore module that syncs characters across multiple accounts to the same
 - **Death Knight exception (IP)** — Optional, default OFF. Same logic for IP tiers using tier 13 (Sunwell Plateau) as the threshold.
 - **Secure key system** — SHA-256 hashed keys are required to link accounts. Keys persist until overwritten or a GM clears them.
 - **Auto orphan cleanup** — On every server startup, levelsync data referencing deleted characters is pruned. Empty groups are removed silently.
+- **Gold Pool** — `.levelsync money` drains every other group member's gold (online + offline) into the caller's wallet in a single operation.
+- **Self raid/dungeon unbind (opt-in)** — `.levelsync unbindall` is a non-GM equivalent of `.instance unbind all`. Default OFF; intended for personal/private servers where the operator wants to give every player the convenience of clearing their own lockouts.
 
 ---
 
@@ -85,6 +87,8 @@ The asymmetry is deliberate. Tier-ups are intentional progression events that th
 | `LevelSync.Enable` | `1` | Enable or disable the module entirely |
 | `LevelSync.AllowLevelSync` | `1` | Allow players to use level sync |
 | `LevelSync.AllowProgressionSync` | `1` | Allow players to use IP sync (requires mod-individual-progression) |
+| `LevelSync.AllowMoneyCommands` | `1` | Allow players to use `.levelsync money` to pool group gold into the caller's wallet |
+| `LevelSync.AllowRaidUnbind` | `0` | Allow players to use `.levelsync unbindall` (non-GM `.instance unbind all`). Off by default; recommended only for private servers |
 | `LevelSync.MaxLinkedAccounts` | `6` | Maximum accounts per sync group (1–10) |
 | `LevelSync.DeathKnightException` | `0` | Allow DKs to boost non-DK characters below level 55 (`0` = excluded, `1` = participates normally) |
 | `LevelSync.DeathKnightIPException` | `0` | Allow DKs to boost non-DK characters below IP tier 13 (`0` = excluded, `1` = participates normally) |
@@ -153,6 +157,8 @@ All commands begin with `.levelsync`.
 | `.levelsync status` | Show your sync group summary: group ID, account count, sync states, and all members with live level, class, and IP tier. Ends with a link to the LevelsyncUI addon. |
 | `.levelsync level on\|off` | Enable or disable level sync for your group. Enabling fires a full resync at the moment of toggle (level + XP, multi-ceiling DK rules). Subject to a 10-second cooldown per group. |
 | `.levelsync IP on\|off` | Enable or disable IP sync for your group. Enabling fires a full tier resync. Same 10-second cooldown applies. |
+| `.levelsync money` | One-shot. Drains every other group member's gold (online + offline) into your wallet. Refused if the resulting wallet would exceed the gold cap (`MAX_MONEY_AMOUNT`) — withdraw manually first if so. Refused if the group has only you or no one has any gold. Online drained members get a chat notice. Subject to the same 10-second cooldown as the toggles. |
+| `.levelsync unbindall [name]` | One-shot. Wipes every instance binding the target has across all 4 difficulty slots (dungeons + raids), preserving the binding for the map the target is currently inside. **No arg** → clicked/tab-selected player, falls back to you (same semantics as stock `.instance unbind all`). **With name** → online player matching that name (case-insensitive); refused if offline. Requires `LevelSync.AllowRaidUnbind = 1` on the server; refuses with a "disabled by server" message otherwise. No cooldown. |
 
 ### Cooldown rejection message
 
@@ -191,6 +197,7 @@ In-game the output appears with color coding: `[LevelSync]` in green, ON in gree
 |---------|-------------|
 | `.levelsync gm removeall <charname>` | Fully disband the sync group that the named character belongs to and remove all associated account keys. If the character is not in a group, removes their account key only. |
 | `.levelsync gm xp <amount>` | Grant XP to your current target (or self if no target). Uses `Player::GiveXP` so it goes through AC's normal level-up pipeline — including mod-playerbots' XP-rate multiplier when targeted at a bot. Useful for testing the XP propagation paths. |
+| `.levelsync gm unbindall [name]` | GM-gated counterpart to `.levelsync unbindall`. Same overloaded target resolution: clicked/tab-selected player with self fallback if no arg, or online named player (case-insensitive) if given. Always available to GMs regardless of `LevelSync.AllowRaidUnbind` — that flag only controls the player form. Online targets only. |
 
 ### Working with `.ip set`
 
