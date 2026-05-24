@@ -163,25 +163,25 @@ static const char* IPTierName(uint8 tier)
 {
     switch (tier)
     {
-        case 0:  return "Starting Point";
-        case 1:  return "Molten Core";
-        case 2:  return "Onyxia";
-        case 3:  return "Blackwing Lair";
-        case 4:  return "Pre-AQ";
-        case 5:  return "AQ War Effort";
-        case 6:  return "Ahn'Qiraj";
-        case 7:  return "Naxxramas 40";
-        case 8:  return "Pre-TBC";
-        case 9:  return "Karazhan / Gruul / Magtheridon";
-        case 10: return "Serpentshrine Cavern / Tempest Keep";
-        case 11: return "Hyjal Summit / Black Temple";
-        case 12: return "Zul'Aman";
-        case 13: return "Sunwell Plateau";
-        case 14: return "Naxxramas / Eye of Eternity / Obsidian Sanctum";
-        case 15: return "Ulduar";
-        case 16: return "Trial of the Crusader";
-        case 17: return "Icecrown Citadel";
-        case 18: return "Ruby Sanctum";
+        case 0:  return "Molten Core / Onyxia";
+        case 1:  return "Molten Core / Onyxia";
+        case 2:  return "Blackwing Lair";
+        case 3:  return "Pre-AQ";
+        case 4:  return "AQ War Effort";
+        case 5:  return "Ahn'Qiraj";
+        case 6:  return "Naxxramas 40";
+        case 7:  return "Pre-TBC";
+        case 8:  return "Karazhan / Gruul's Lair / Magtheridon's Lair";
+        case 9:  return "Serpentshrine Cavern / Tempest Keep";
+        case 10: return "Hyjal Summit / Black Temple";
+        case 11: return "(Skipped)";
+        case 12: return "Sunwell Plateau";
+        case 13: return "Naxxramas / Eye of Eternity / Obsidian Sanctum";
+        case 14: return "Ulduar";
+        case 15: return "Trial of the Crusader";
+        case 16: return "Icecrown Citadel";
+        case 17: return "Ruby Sanctum";
+        case 18: return "Tiers Complete";
         default: return "Unknown (IP may not be enabled)";
     }
 }
@@ -278,8 +278,18 @@ static void DisplayGroupMembers(ChatHandler* handler, uint32 groupId)
 static void DisplayGroupStatus(ChatHandler* handler, uint32 groupId)
 {
     uint32 accounts  = sLevelSync->GetGroupAccountCount(groupId);
-    bool   levelSync = sLevelSync->IsGroupLevelSyncEnabled(groupId);
-    bool   progSync  = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
+
+    // Fire-only model: sync only runs when the player invokes
+    //   .levelsync level on   or   .levelsync IP on
+    // Status reflects whether the server conf permits the sync, NOT a
+    // persistent per-group toggle. "Ready" = conf-enabled and the
+    // command will fire when invoked; "Off" = conf-disabled.
+    bool levelReady = sLevelSync->IsLevelSyncAllowed();
+    bool progReady  = sLevelSync->IsProgressionAllowed();
+
+    // OLD (per-group persistent toggle, kept for reference):
+    // bool levelSync = sLevelSync->IsGroupLevelSyncEnabled(groupId);
+    // bool progSync  = sLevelSync->IsGroupProgressionSyncEnabled(groupId);
 
     QueryResult countResult = CharacterDatabase.Query(
         "SELECT COUNT(*) FROM levelsync_members WHERE group_id = {}", groupId);
@@ -288,8 +298,8 @@ static void DisplayGroupStatus(ChatHandler* handler, uint32 groupId)
     handler->PSendSysMessage("|cff00ff00[LevelSync]|r Sync Group #{}", groupId);
     handler->PSendSysMessage("  Accounts: {}/{}", accounts, sLevelSync->GetMaxLinkedAccounts());
     handler->PSendSysMessage("  Total Characters: {}", totalChars);
-    handler->PSendSysMessage("  Level sync: {}", levelSync ? "|cff00ff00ON|r" : "|cffff0000OFF|r");
-    handler->PSendSysMessage("  Progression sync: {}", progSync ? "|cff00ff00ON|r" : "|cffff0000OFF|r");
+    handler->PSendSysMessage("  Level sync: {}", levelReady ? "|cff00ff00Available|r" : "|cffff0000Disabled|r");
+    handler->PSendSysMessage("  Progression sync: {}", progReady ? "|cff00ff00Available|r" : "|cffff0000Disabled|r");
     handler->PSendSysMessage("|cff00ff00[LevelSync]|r Group members:");
     DisplayGroupMembers(handler, groupId);
     handler->PSendSysMessage("|cff00ff00[LevelSync]|r For a graphical interface use the addon: |cff3399ffhttps://github.com/Lichborne-AC/LevelsyncUI|r");
@@ -1037,7 +1047,11 @@ public:
     }
 
     // -------------------------------------------------------------------
-    // .levelsync level on|off
+    // .levelsync level on
+    //
+    // Fire-only: runs a single level sync (highest member level
+    // propagated to the rest of the group), then status returns to
+    // "Ready". No persistent on/off state.
     // -------------------------------------------------------------------
     static bool HandleLevelCommand(ChatHandler* handler, char const* args)
     {
@@ -1056,11 +1070,21 @@ public:
         char* arg = strtok(const_cast<char*>(args), " ");
         if (!arg)
         {
-            handler->PSendSysMessage("Usage: .levelsync level on|off");
+            handler->PSendSysMessage("Usage: .levelsync level on");
             return true;
         }
 
-        bool enable = (std::string(arg) == "on");
+        std::string argStr(arg);
+        if (argStr == "off")
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync is fire-only — nothing to turn off. Use .levelsync level on to fire a sync.");
+            return true;
+        }
+        if (argStr != "on")
+        {
+            handler->PSendSysMessage("Usage: .levelsync level on");
+            return true;
+        }
 
         Player* player = handler->GetSession()->GetPlayer();
         uint32  myGuid = player->GetGUID().GetCounter();
@@ -1072,6 +1096,7 @@ public:
             return true;
         }
 
+        // 10s per-group cooldown for players. GMs bypass.
         bool isGM = handler->GetSession() && handler->GetSession()->GetSecurity() > SEC_PLAYER;
         if (!isGM)
         {
@@ -1085,24 +1110,34 @@ public:
             }
         }
 
-        CharacterDatabase.DirectExecute(
-            "UPDATE levelsync_groups SET level_sync_enabled = {} WHERE group_id = {}",
-            enable ? 1 : 0, groupId);
-
-        if (enable)
-        {
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group to highest level...");
-            sLevelSync->SyncGroupOnLevelToggle(groupId);
-        }
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group to highest level...");
+        sLevelSync->SyncGroupOnLevelToggle(groupId);
 
         DisplayGroupStatus(handler, groupId);
-        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync fired. Status is back to |cff00ff00Available|r (10s cooldown).");
 
         return true;
+
+        // OLD (persistent on/off toggle, kept for reference):
+        // bool enable = (std::string(arg) == "on");
+        // CharacterDatabase.DirectExecute(
+        //     "UPDATE levelsync_groups SET level_sync_enabled = {} WHERE group_id = {}",
+        //     enable ? 1 : 0, groupId);
+        // if (enable)
+        // {
+        //     handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group to highest level...");
+        //     sLevelSync->SyncGroupOnLevelToggle(groupId);
+        // }
+        // DisplayGroupStatus(handler, groupId);
+        // handler->PSendSysMessage("|cff00ff00[LevelSync]|r Level sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
     }
 
     // -------------------------------------------------------------------
-    // .levelsync IP on|off
+    // .levelsync IP on
+    //
+    // Fire-only: runs a single IP-tier sync (highest tier in the group
+    // propagated to the rest), then status returns to "Ready". No
+    // persistent on/off state.
     // -------------------------------------------------------------------
     static bool HandleIndivProgressionCommand(ChatHandler* handler, char const* args)
     {
@@ -1121,11 +1156,21 @@ public:
         char* arg = strtok(const_cast<char*>(args), " ");
         if (!arg)
         {
-            handler->PSendSysMessage("Usage: .levelsync IP on|off");
+            handler->PSendSysMessage("Usage: .levelsync IP on");
             return true;
         }
 
-        bool enable = (std::string(arg) == "on");
+        std::string argStr(arg);
+        if (argStr == "off")
+        {
+            handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync is fire-only — nothing to turn off. Use .levelsync IP on to fire a sync.");
+            return true;
+        }
+        if (argStr != "on")
+        {
+            handler->PSendSysMessage("Usage: .levelsync IP on");
+            return true;
+        }
 
         Player* player = handler->GetSession()->GetPlayer();
         uint32  myGuid = player->GetGUID().GetCounter();
@@ -1137,6 +1182,7 @@ public:
             return true;
         }
 
+        // 10s per-group cooldown for players. GMs bypass.
         bool isGM = handler->GetSession() && handler->GetSession()->GetSecurity() > SEC_PLAYER;
         if (!isGM)
         {
@@ -1150,20 +1196,26 @@ public:
             }
         }
 
-        CharacterDatabase.DirectExecute(
-            "UPDATE levelsync_groups SET sync_progression = {} WHERE group_id = {}",
-            enable ? 1 : 0, groupId);
-
-        if (enable)
-        {
-            handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group progression...");
-            sLevelSync->SyncIPOnToggle(groupId);
-        }
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group progression...");
+        sLevelSync->SyncIPOnToggle(groupId);
 
         DisplayGroupStatus(handler, groupId);
-        handler->PSendSysMessage("|cff00ff00[LevelSync]|r Progression sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
+        handler->PSendSysMessage("|cff00ff00[LevelSync]|r IP sync fired. Status is back to |cff00ff00Available|r (10s cooldown).");
 
         return true;
+
+        // OLD (persistent on/off toggle, kept for reference):
+        // bool enable = (std::string(arg) == "on");
+        // CharacterDatabase.DirectExecute(
+        //     "UPDATE levelsync_groups SET sync_progression = {} WHERE group_id = {}",
+        //     enable ? 1 : 0, groupId);
+        // if (enable)
+        // {
+        //     handler->PSendSysMessage("|cff00ff00[LevelSync]|r Syncing group progression...");
+        //     sLevelSync->SyncIPOnToggle(groupId);
+        // }
+        // DisplayGroupStatus(handler, groupId);
+        // handler->PSendSysMessage("|cff00ff00[LevelSync]|r Progression sync {}.", enable ? "|cff00ff00enabled|r" : "|cffff0000disabled|r");
     }
 
     // -------------------------------------------------------------------

@@ -1118,41 +1118,34 @@ class LevelSyncPlayerScript : public PlayerScript
 public:
     LevelSyncPlayerScript() : PlayerScript("LevelSyncPlayerScript") {}
 
-    // Sync triggers:
-    //   - login / logout: full level + IP sync (lazy-sync model)
-    //   - toggle command: forced full resync (.levelsync level on, .levelsync IP on)
-    //   - tier-up via IP-progression quest reward: per-event IP sync only
-    //
-    // Per-event LEVEL sync is intentionally NOT hooked. Bot-driven XP gain
-    // (e.g. mod-playerbots' SyncQuestWithPlayer mirroring) would cascade
-    // levels back to the master and grant unearned dings. Level drift is
-    // reconciled at session boundaries.
-    //
-    // Per-event IP TIER sync IS hooked. Tier-ups are discrete milestone
-    // events triggered by mod-individual-progression's scripted logic when
-    // a tier's content is completed; bots don't normally acquire IP-tier
-    // quests through quest-mirroring, so the cascade concern is much weaker.
-    // Real-time tier propagation matches user expectations for what's a
-    // celebrated group milestone.
-    void OnPlayerLogin(Player* player) override
+    // Fire-only model: sync runs only when a player invokes
+    //   .levelsync level on   or   .levelsync IP on
+    // No automatic sync on login, logout, or tier-up. The Mgr methods
+    // (SyncGroupOnLogin, SyncIPOnLogin, etc.) are kept available so the
+    // old auto-sync behavior can be re-enabled in the future by un-
+    // commenting the hook bodies below.
+    void OnPlayerLogin(Player* /*player*/) override
     {
-        sLevelSync->SyncGroupOnLogin(player);
-        sLevelSync->SyncIPOnLogin(player);
+        // OLD (auto-sync on login):
+        // sLevelSync->SyncGroupOnLogin(player);
+        // sLevelSync->SyncIPOnLogin(player);
     }
 
-    void OnPlayerLogout(Player* player) override
+    void OnPlayerLogout(Player* /*player*/) override
     {
-        sLevelSync->SyncGroupOnLogout(player);
-        sLevelSync->SyncIPOnLogout(player);
+        // OLD (auto-sync on logout):
+        // sLevelSync->SyncGroupOnLogout(player);
+        // sLevelSync->SyncIPOnLogout(player);
     }
 
-    void OnPlayerCompleteQuest(Player* player, Quest const* quest) override
+    void OnPlayerCompleteQuest(Player* /*player*/, Quest const* /*quest*/) override
     {
-        uint32 questId = quest->GetQuestId();
-        if (questId <= LEVELSYNC_IP_QUEST_BASE || questId > LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER)
-            return;
-        uint8 newTier = uint8(questId - LEVELSYNC_IP_QUEST_BASE);
-        sLevelSync->SyncIPOnTierUp(player, newTier);
+        // OLD (per-event IP sync on tier-up quest reward):
+        // uint32 questId = quest->GetQuestId();
+        // if (questId <= LEVELSYNC_IP_QUEST_BASE || questId > LEVELSYNC_IP_QUEST_BASE + LEVELSYNC_IP_MAX_TIER)
+        //     return;
+        // uint8 newTier = uint8(questId - LEVELSYNC_IP_QUEST_BASE);
+        // sLevelSync->SyncIPOnTierUp(player, newTier);
     }
 };
 
