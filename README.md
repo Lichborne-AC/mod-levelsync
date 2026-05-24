@@ -202,9 +202,10 @@ In-game the output appears with color coding: `[LevelSync]` in green, `Available
 
 ---
 
-## UI Addon
+## UI Addons
 
-[LevelsyncUI](https://github.com/Lichborne-AC/LevelsyncUI) — A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon. The link is also printed at the end of every `.levelsync status` output.
+- [LevelsyncUI](https://github.com/Lichborne-AC/LevelsyncUI) — A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon. The link is also printed at the end of every `.levelsync status` output.
+- [PlayerbotManager](https://github.com/Lichborne-AC/PlayerbotManager) — Companion addon for mod-playerbots. Useful alongside mod-levelsync for managing the altbot roster that a sync group is built around.
 
 ---
 
