@@ -202,34 +202,6 @@ In-game the output appears with color coding: `[LevelSync]` in green, `Available
 
 ---
 
-## IP Tier Reference
-
-Used with mod-individual-progression. Tiers are stored as hidden quest IDs in `character_queststatus_rewarded`.
-
-| Tier | Quest ID | Name |
-|------|----------|------|
-| 0 | — | None (Starting Point) |
-| 1 | 66001 | Molten Core |
-| 2 | 66002 | Onyxia |
-| 3 | 66003 | Blackwing Lair |
-| 4 | 66004 | Pre-AQ |
-| 5 | 66005 | AQ War Effort |
-| 6 | 66006 | Ahn'Qiraj |
-| 7 | 66007 | Naxxramas 40 |
-| 8 | 66008 | Pre-TBC |
-| 9 | 66009 | Karazhan / Gruul / Magtheridon |
-| 10 | 66010 | Serpentshrine Cavern / Tempest Keep |
-| 11 | 66011 | Hyjal Summit / Black Temple |
-| 12 | 66012 | Zul'Aman |
-| 13 | 66013 | Sunwell Plateau |
-| 14 | 66014 | Naxxramas / Eye of Eternity / Obsidian Sanctum |
-| 15 | 66015 | Ulduar |
-| 16 | 66016 | Trial of the Crusader |
-| 17 | 66017 | Icecrown Citadel |
-| 18 | 66018 | Ruby Sanctum |
-
----
-
 ## UI Addon
 
 [LevelsyncUI](https://github.com/Lichborne-AC/LevelsyncUI) — A World of Warcraft addon (WotLK 3.3.5a, AzerothCore) that provides a graphical UI for mod-levelsync. Recommended but not required — all functionality is available via dot commands without the addon. The link is also printed at the end of every `.levelsync status` output.
